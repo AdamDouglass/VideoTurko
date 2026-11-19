@@ -1,0 +1,59 @@
+From efa2071d772f6d26b8335c324deb21ac040260f1 Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Wed, 18 Nov 2026 23:31:57 +0300
+Subject: [PATCH 11/23] 0007: SD_CUT_CACHE_HOST_MB copied cut tensors to host
+ RAM (default off)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/core/runner_cache.cpp | 27 +++++++++++++++++++++++++--
+ 1 file changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/src/core/runner_cache.cpp b/src/core/runner_cache.cpp
+index 9bbcae0..6e1b94e 100644
+--- a/src/core/runner_cache.cpp
++++ b/src/core/runner_cache.cpp
+@@ -1,6 +1,7 @@
+ #include "core/runner_cache.h"
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <iterator>
+ #include <unordered_set>
+ 
+@@ -49,8 +50,30 @@ namespace sd {
+         if (ggml_graph_cut::tensor_buffer(source) == nullptr) {
+             return nullptr;
+         }
+-        status     = GGML_STATUS_ALLOC_FAILED;
+-        auto entry = allocate(backend, name, source);
++        status = GGML_STATUS_ALLOC_FAILED;
++        // SD_CUT_CACHE_HOST_MB=<MB> (default unset = unchanged): copied (not directly bound) cut tensors of at least this size
++        // are kept in host RAM instead of VRAM; the scheduler copies them back when a later segment reads them. Pure data copy.
++        static const long long host_min_mb = [] {
++            const char* e = std::getenv("SD_CUT_CACHE_HOST_MB");
++            return (e != nullptr && e[0] != '\0') ? std::atoll(e) : 0LL;
++        }();
++        std::unique_ptr<CachedTensor> entry;
++        if (host_min_mb > 0 && ggml_nbytes(source) >= static_cast<size_t>(host_min_mb) * 1024ULL * 1024ULL) {
++            entry          = std::make_unique<CachedTensor>();
++            entry->context = ggml_init({2 * ggml_tensor_overhead(), nullptr, true});
++            if (entry->context == nullptr) {
++                return nullptr;
++            }
++            entry->tensor = ggml_dup_tensor(entry->context, source);
++            std::copy(std::begin(source->nb), std::end(source->nb), std::begin(entry->tensor->nb));
++            ggml_set_name(entry->tensor, name.c_str());
++            entry->buffer = ggml_backend_alloc_ctx_tensors_from_buft(entry->context, ggml_backend_cpu_buffer_type());
++            if (entry->buffer == nullptr) {
++                return nullptr;
++            }
++        } else {
++            entry = allocate(backend, name, source);
++        }
+         if (entry == nullptr) {
+             return nullptr;
+         }
+-- 
+2.51.0.windows.2
+

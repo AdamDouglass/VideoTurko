@@ -1,0 +1,67 @@
+From 99d2a42547039d48a5fcf43524eb37381aae8336 Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Thu, 19 Nov 2026 10:01:05 +0300
+Subject: [PATCH 16/23] 0013: SD_ATTN_SET_OUT head-group outputs written into
+ one preallocated tensor (default off)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/model/diffusion/minimax_h3.hpp | 34 ++++++++++++++++++++++++++++--
+ 1 file changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/src/model/diffusion/minimax_h3.hpp b/src/model/diffusion/minimax_h3.hpp
+index a4939f9..b0ef3b2 100644
+--- a/src/model/diffusion/minimax_h3.hpp
++++ b/src/model/diffusion/minimax_h3.hpp
+@@ -446,16 +446,46 @@ namespace MiniMaxH3 {
+                                                                              1.0, double(heads)))
+                                            : heads;
+             if (head_chunk < heads) {
++                // SD_ATTN_SET_OUT=1 (default off, patch 0013): write each head group's output straight into one preallocated
++                // [heads*head_dim, ...] tensor (ggml_set_inplace, pure copy) instead of keeping all group outputs alive and
++                // concatenating them (two full copies alive at the end of the attention phase).
++                static const bool set_out = [] {
++                    const char* e = std::getenv("SD_ATTN_SET_OUT");
++                    return e != nullptr && e[0] != '\0' && e[0] != '0';
++                }();
+                 std::vector<ggml_tensor*> outputs;
++                ggml_tensor* packed_out = nullptr;
++                bool set_ok             = set_out;
+                 for (int64_t start = 0; start < heads; start += head_chunk) {
++                    const int64_t stop = std::min(start + head_chunk, heads);
+                     std::vector<ggml_tensor*> part;
+                     for (auto tensor : qkv) {
+-                        part.push_back(ggml_ext_slice(ctx, tensor, 1, start, std::min(start + head_chunk, heads), false));
++                        part.push_back(ggml_ext_slice(ctx, tensor, 1, start, stop, false));
+                     }
+-                    outputs.push_back(attend_heads(ctx, part, pe));
++                    auto group = attend_heads(ctx, part, pe);
++                    if (set_ok && (group->type != GGML_TYPE_F32 || group->ne[0] != (stop - start) * head_dim)) {
++                        set_ok = false;
++                    }
++                    if (set_ok) {
++                        if (!ggml_is_contiguous(group)) {
++                            group = ggml_cont(ctx->ggml_ctx, group);
++                        }
++                        if (packed_out == nullptr) {
++                            packed_out = ggml_new_tensor_4d(ctx->ggml_ctx, GGML_TYPE_F32, heads * head_dim, group->ne[1], group->ne[2], group->ne[3]);
++                        }
++                        packed_out = ggml_set_inplace(ctx->ggml_ctx, packed_out, group, packed_out->nb[1], packed_out->nb[2], packed_out->nb[3],
++                                                      static_cast<size_t>(start * head_dim) * sizeof(float));
++                        ctx->expand_graph(packed_out);
++                        continue;
++                    }
++                    outputs.push_back(group);
+                     // Keep each head group's temporaries out of the concatenation tree's live set.
+                     ctx->expand_graph(outputs.back());
+                 }
++                if (set_ok && packed_out != nullptr && outputs.empty()) {
++                    return packed_out;
++                }
++                GGML_ASSERT(packed_out == nullptr && "SD_ATTN_SET_OUT: mixed group layout");
+                 return ggml_ext_vec_concat(ctx, outputs, 0);
+             }
+             return attend_heads(ctx, qkv, pe);
+-- 
+2.51.0.windows.2
+

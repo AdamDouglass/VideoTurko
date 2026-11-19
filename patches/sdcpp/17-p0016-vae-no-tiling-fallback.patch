@@ -1,0 +1,37 @@
+From e3c72fad5845e6e0e905f53467f296cc5fc635f0 Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Thu, 19 Nov 2026 14:19:05 +0300
+Subject: [PATCH 19/23] 0016: SD_VAE_NO_TILING_FALLBACK (no tiled VAE retry,
+ default off)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/core/backend_fit.cpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/core/backend_fit.cpp b/src/core/backend_fit.cpp
+index 120cbe4..f9635a2 100644
+--- a/src/core/backend_fit.cpp
++++ b/src/core/backend_fit.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ #include "backend_fit.h"
+ 
+ #include <algorithm>
+@@ -495,6 +496,13 @@ namespace sd::backend_fit {
+                                          int latent_tile_size_w,
+                                          int latent_tile_size_h,
+                                          int scale_factor) {
++        // SD_VAE_NO_TILING_FALLBACK=1 (default off): never fall back to approximate tiled VAE decode; the caller then reports the failure.
++        {
++            const char* no_tiling = std::getenv("SD_VAE_NO_TILING_FALLBACK");
++            if (no_tiling != nullptr && no_tiling[0] == '1') {
++                return false;
++            }
++        }
+         // Execution failures can leave the device unusable; tiling only helps with allocation failures.
+         if (status != GGML_STATUS_ALLOC_FAILED) {
+             return false;
+-- 
+2.51.0.windows.2
+

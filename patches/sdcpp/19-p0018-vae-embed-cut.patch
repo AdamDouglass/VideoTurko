@@ -1,0 +1,43 @@
+From 248019c459053a177a0ebf36d1e46a7da7ed3d1a Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Thu, 19 Nov 2026 14:44:45 +0300
+Subject: [PATCH 21/23] 0018: SD_VAE_EMBED_CUT (own graph segment for VAE
+ embed, default off)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/model/vae/minimax_h3_vae.hpp | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/src/model/vae/minimax_h3_vae.hpp b/src/model/vae/minimax_h3_vae.hpp
+index 16b9127..86ae1f8 100644
+--- a/src/model/vae/minimax_h3_vae.hpp
++++ b/src/model/vae/minimax_h3_vae.hpp
+@@ -3,6 +3,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <cstdlib>
+ #include <cmath>
+ #include <memory>
+ #include <string>
+@@ -534,6 +535,16 @@ namespace MiniMaxH3VAE {
+                                                        ggml_new_tensor_2d(ctx->ggml_ctx, registers->type, dim, num_blocks * sol_global_rows));
+             }
+             h = ggml_concat(ctx->ggml_ctx, h, registers, 1);
++            // SD_VAE_EMBED_CUT=1 (default off): own graph segment for x_embedder + register concat, so decoder.blocks.0 does not carry them.
++            {
++                static const bool embed_cut = [] {
++                    const char* e = std::getenv("SD_VAE_EMBED_CUT");
++                    return e != nullptr && e[0] == '1';
++                }();
++                if (embed_cut) {
++                    sd::ggml_graph_cut::mark_graph_cut(h, "minimax_h3_vae.decoder.embed", "hidden_states");
++                }
++            }
+ 
+             const int64_t rows_per_chunk = sol ? width * height + sol_global_rows : 0;
+             for (int i = 0; i < num_layers; ++i) {
+-- 
+2.51.0.windows.2
+

@@ -1,0 +1,26 @@
+name: Bug report / Hata bildirimi
+description: Something failed during install or generation
+body:
+  - type: input
+    id: gpu
+    attributes:
+      label: "GPU, driver, RAM / Ekran karti, surucu, RAM"
+      placeholder: "GTX 1050 Ti 4 GB, driver 581, 16 GB"
+    validations:
+      required: true
+  - type: input
+    id: komut
+    attributes:
+      label: "Command and frame count / Komut ve kare sayisi"
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: "Last lines of the log / Gunlugun son satirlari (no personal paths please)"
+    validations:
+      required: true
+  - type: textarea
+    id: beklenen
+    attributes:
+      label: "Expected vs what happened / Beklenen ve olan"

@@ -1,0 +1,142 @@
+From ac916c8e6b16815e0870ab552806976c25274a6c Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Tue, 17 Nov 2026 21:28:57 +0300
+Subject: [PATCH 02/23] video: SD_VIDEO_LATENT_SAVE/LOAD (VAE'yi ayri olcmek
+ icin), gerekce yama_h3hiz/0001
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/pipeline/video.cpp | 88 +++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 87 insertions(+), 1 deletion(-)
+
+diff --git a/src/pipeline/video.cpp b/src/pipeline/video.cpp
+index 915dc54..f071e96 100644
+--- a/src/pipeline/video.cpp
++++ b/src/pipeline/video.cpp
+@@ -3,7 +3,9 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <cstdio>
+ #include <cstdlib>
++#include <cstring>
+ #include <optional>
+ #include <utility>
+ 
+@@ -1193,6 +1195,64 @@ namespace sd::pipeline {
+         return latents;
+     }
+ 
++    // ---- Video latent save / decode-only (env SD_VIDEO_LATENT_SAVE=<file>, SD_VIDEO_LATENT_LOAD=<file>; both unset = no effect). ----
++    // Same file format as the image path ("SDLAT001", int32 ndim, int64 shape[ndim], float32 raw: bit-exact round trip).
++    // Save writes the final sampled latent (video + packed audio latent, after optional hires upscale) right after sampling.
++    // Load skips the text encoder and sampling; audio decode, video VAE decode and encoding run unchanged.
++    static bool save_video_latent_file(const char* path, const sd::Tensor<float>& latent) {
++        FILE* f = fopen(path, "wb");
++        if (f == nullptr) {
++            LOG_ERROR("SD_VIDEO_LATENT_SAVE: cannot open %s", path);
++            return false;
++        }
++        const int32_t ndim = static_cast<int32_t>(latent.shape().size());
++        bool ok            = fwrite("SDLAT001", 1, 8, f) == 8 && fwrite(&ndim, sizeof(ndim), 1, f) == 1;
++        for (int64_t d : latent.shape()) {
++            ok = ok && fwrite(&d, sizeof(d), 1, f) == 1;
++        }
++        ok = ok && fwrite(latent.data(), sizeof(float), static_cast<size_t>(latent.numel()), f) == static_cast<size_t>(latent.numel());
++        ok = (fclose(f) == 0) && ok;
++        if (!ok) {
++            LOG_ERROR("SD_VIDEO_LATENT_SAVE: write failed for %s", path);
++        }
++        return ok;
++    }
++
++    static bool load_video_latent_file(const char* path, sd::Tensor<float>* out) {
++        FILE* f = fopen(path, "rb");
++        if (f == nullptr) {
++            LOG_ERROR("SD_VIDEO_LATENT_LOAD: cannot open %s", path);
++            return false;
++        }
++        char magic[8];
++        int32_t ndim = 0;
++        bool ok      = fread(magic, 1, 8, f) == 8 && memcmp(magic, "SDLAT001", 8) == 0 &&
++                  fread(&ndim, sizeof(ndim), 1, f) == 1 && ndim > 0 && ndim <= 8;
++        std::vector<int64_t> shape;
++        for (int32_t i = 0; ok && i < ndim; ++i) {
++            int64_t d = 0;
++            ok        = fread(&d, sizeof(d), 1, f) == 1 && d > 0;
++            shape.push_back(d);
++        }
++        if (ok) {
++            sd::Tensor<float> t(shape);
++            ok = fread(t.data(), sizeof(float), static_cast<size_t>(t.numel()), f) == static_cast<size_t>(t.numel());
++            if (ok) {
++                *out = std::move(t);
++            }
++        }
++        fclose(f);
++        if (!ok) {
++            LOG_ERROR("SD_VIDEO_LATENT_LOAD: bad or truncated latent file %s", path);
++        }
++        return ok;
++    }
++
++    static const char* video_latent_env(const char* name) {
++        const char* v = std::getenv(name);
++        return (v != nullptr && v[0] != '\0') ? v : nullptr;
++    }
++
+     static std::optional<ImageGenerationEmbeds> prepare_video_generation_embeds(StableDiffusionGGML* sd,
+                                                                                 const sd_vid_gen_params_t* sd_vid_gen_params,
+                                                                                 const GenerationRequest& request,
+@@ -1201,6 +1261,10 @@ namespace sd::pipeline {
+         ConditionerRunnerEndOnExit conditioner_runner_end{sd->cond_stage_model.get()};
+ 
+         ImageGenerationEmbeds embeds;
++        if (video_latent_env("SD_VIDEO_LATENT_LOAD") != nullptr) {
++            LOG_INFO("SD_VIDEO_LATENT_LOAD: text encoder skipped");
++            return embeds;
++        }
+         ConditionerParams condition_params;
+         condition_params.clip_skip             = request.clip_skip;
+         condition_params.text                  = request.prompt;
+@@ -1993,7 +2057,19 @@ namespace sd::pipeline {
+         }
+         LOG_VERBOSE("sample %dx%dx%d", W, H, T);
+         int64_t sampling_start         = ggml_time_ms();
+-        sd::Tensor<float> final_latent = sd->sample(sd->diffusion_model,
++        sd::Tensor<float> loaded_video_latent;
++        const char* video_latent_load = video_latent_env("SD_VIDEO_LATENT_LOAD");
++        if (video_latent_load != nullptr) {
++            if (latent_upscale_enabled || plan.high_noise_sample_steps > 0) {
++                LOG_ERROR("SD_VIDEO_LATENT_LOAD cannot be combined with hires or high-noise sampling");
++                return false;
++            }
++            if (!load_video_latent_file(video_latent_load, &loaded_video_latent)) {
++                return false;
++            }
++            LOG_INFO("SD_VIDEO_LATENT_LOAD: loaded %s, sampling skipped", video_latent_load);
++        }
++        sd::Tensor<float> final_latent = video_latent_load != nullptr ? std::move(loaded_video_latent) : sd->sample(sd->diffusion_model,
+                                                     true,
+                                                     x_t,
+                                                     std::move(noise),
+@@ -2197,6 +2273,16 @@ namespace sd::pipeline {
+         int64_t latent_end = ggml_time_ms();
+         LOG_INFO("generating latent video completed, taking %.2fs", (latent_end - latent_start) * 1.0f / 1000);
+ 
++        if (video_latent_load == nullptr) {
++            const char* video_latent_save = video_latent_env("SD_VIDEO_LATENT_SAVE");
++            if (video_latent_save != nullptr) {
++                if (!save_video_latent_file(video_latent_save, final_latent)) {
++                    return false;
++                }
++                LOG_INFO("SD_VIDEO_LATENT_SAVE: wrote %s", video_latent_save);
++            }
++        }
++
+         sd_audio_t* generated_audio = nullptr;
+         if (sd->version == VERSION_WAN2_2_S2V && sd_vid_gen_params->ref_audios_count > 0) {
+             // Return the driving track for muxing with the generated video.
+-- 
+2.51.0.windows.2
+

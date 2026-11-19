@@ -1,0 +1,1203 @@
+From 871d89e1f7e30d9f87a94e095f7effd602d3aee7 Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Tue, 17 Nov 2026 21:28:44 +0300
+Subject: [PATCH 1/3] taban: sdcpp_hiz ggml calisma durumu
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/ggml-cuda/CMakeLists.txt             |  12 +
+ src/ggml-cuda/conv2d.cu                  | 177 +++++++++++++
+ src/ggml-cuda/conv3d.cu                  | 188 ++++++++++++++
+ src/ggml-cuda/fattn-common.cuh           |   3 +-
+ src/ggml-cuda/fattn-tile-a3.cuh          | 317 +++++++++++++++++++++++
+ src/ggml-cuda/fattn-tile.cuh             |  49 ++++
+ src/ggml-cuda/fattn.cu                   |   4 +
+ src/ggml-cuda/ggml-cuda.cu               |  80 ++++++
+ src/ggml-cuda/im2col.cu                  |  69 +++++
+ src/ggml-cuda/mmq-config-pascal-dp4a.cuh |   2 +-
+ src/ggml.c                               |   5 +-
+ tests/test-backend-ops.cpp               |  40 ++-
+ 12 files changed, 942 insertions(+), 4 deletions(-)
+ create mode 100644 src/ggml-cuda/fattn-tile-a3.cuh
+
+diff --git a/src/ggml-cuda/CMakeLists.txt b/src/ggml-cuda/CMakeLists.txt
+index 37aa6d94..2cc9f068 100644
+--- a/src/ggml-cuda/CMakeLists.txt
++++ b/src/ggml-cuda/CMakeLists.txt
+@@ -167,6 +167,18 @@ if (CUDAToolkit_FOUND)
+         target_link_libraries(ggml-cuda PRIVATE CCCL::CCCL)
+     endif()
+ 
++    if (GGML_CUDA_CUDNN_CONV2D_F32)
++        # opt-in cuDNN F32 conv2d branch (runtime switch GGML_CUDA_CUDNN_CONV2D=1); set CUDNN_ROOT or CUDNN_INCLUDE_DIR/CUDNN_LIBRARY
++        find_path(CUDNN_INCLUDE_DIR cudnn.h HINTS ${CUDNN_ROOT} PATH_SUFFIXES include)
++        find_library(CUDNN_LIBRARY NAMES cudnn HINTS ${CUDNN_ROOT} PATH_SUFFIXES lib lib64 lib/x64)
++        if (NOT CUDNN_INCLUDE_DIR OR NOT CUDNN_LIBRARY)
++            message(FATAL_ERROR "GGML_CUDA_CUDNN_CONV2D_F32 needs cuDNN; set CUDNN_ROOT")
++        endif()
++        target_include_directories(ggml-cuda PRIVATE ${CUDNN_INCLUDE_DIR})
++        target_link_libraries(ggml-cuda PRIVATE ${CUDNN_LIBRARY})
++        target_compile_definitions(ggml-cuda PRIVATE GGML_CUDA_CUDNN_CONV2D_F32=1)
++    endif()
++
+     if (GGML_STATIC)
+         if (WIN32)
+             # As of 12.3.1 CUDA Toolkit for Windows does not offer a static cublas library
+diff --git a/src/ggml-cuda/conv2d.cu b/src/ggml-cuda/conv2d.cu
+index 9636db23..fceeb70d 100644
+--- a/src/ggml-cuda/conv2d.cu
++++ b/src/ggml-cuda/conv2d.cu
+@@ -2,6 +2,174 @@
+ #include "convert.cuh"
+ #include "mma.cuh"
+ 
++#ifdef GGML_CUDA_CUDNN_CONV2D_F32
++// ---- cuDNN F32 conv2d branch (opt-in: env GGML_CUDA_CUDNN_CONV2D=1; unset/0 = the old direct kernel, zero effect). ----
++// All tensors stay F32 (an F16 kernel is widened exactly), default (non tensor-op) math, so no precision is dropped versus
++// im2col+sgemm; the sum order differs, so results are NOT byte-identical to the old path (judge by the quality gate).
++// Workspace cap: env GGML_CUDA_CUDNN_WS_MB (default 256). The first v7 candidate that fits the cap is used.
++#include <cudnn.h>
++#include <chrono>
++#include <cstdlib>
++#include <cstring>
++#include <map>
++#include <tuple>
++#include <array>
++
++// Patch 0010: pins the cuDNN algorithm family and caches the choice per shape (see header of the patch).
++// GGML_CUDA_CUDNN_ALGO: "gemm" (default) = only IMPLICIT_GEMM / IMPLICIT_PRECOMP_GEMM / GEMM (plain multiply-add in one fixed summation scheme,
++// no Winograd / FFT transforms); "any" = every algorithm the heuristic returns (the 0009 behaviour).
++static bool ggml_cuda_cudnn_algo_allowed(cudnnConvolutionFwdAlgo_t algo) {
++    static const bool any = [] { const char * e = getenv("GGML_CUDA_CUDNN_ALGO"); return e && strcmp(e, "any") == 0; }();
++    if (any) {
++        return true;
++    }
++    return algo == CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM || algo == CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM ||
++           algo == CUDNN_CONVOLUTION_FWD_ALGO_GEMM;
++}
++
++static bool ggml_cuda_cudnn_conv2d_enabled() {
++    static const bool on = [] { const char * e = getenv("GGML_CUDA_CUDNN_CONV2D"); return e && e[0] == '1'; }();
++    return on;
++}
++
++// returns false (nothing written) when no allowed algorithm fits the workspace cap: the caller then runs the old kernel
++static bool conv2d_cudnn_f32(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * kernel = dst->src[0];
++    const ggml_tensor * input  = dst->src[1];
++    const auto checked = [](cudnnStatus_t status) {
++        if (status != CUDNN_STATUS_SUCCESS) {
++            GGML_ABORT("cuDNN conv2d F32 failed: %s", cudnnGetErrorString(status));
++        }
++    };
++    static const size_t ws_cap = [] {
++        const char * e = getenv("GGML_CUDA_CUDNN_WS_MB");
++        const long v = e ? atol(e) : 0;
++        return (size_t) (v > 0 ? v : 256) * 1024 * 1024;
++    }();
++    static const bool timing_on = getenv("GGML_CUDA_CUDNN_LOG") != nullptr;  // patch 0026: diagnostic timing, zero effect without the env
++    const auto ms_since = [](std::chrono::steady_clock::time_point t0) {
++        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
++    };
++    thread_local cudnnHandle_t handle = nullptr;
++    if (!handle) {
++        const auto t0 = std::chrono::steady_clock::now();
++        checked(cudnnCreate(&handle));
++        if (timing_on) {
++            fprintf(stderr, "cudnn timing: cudnnCreate %.1f ms\n", ms_since(t0));
++        }
++    }
++    checked(cudnnSetStream(handle, ctx.stream()));
++
++    // F16 kernel -> exact F32 widening (VAE weights are normally F32 already: no copy then).
++    ggml_cuda_pool_alloc<float> w_f32(ctx.pool());
++    const float * w_ptr = (const float *) kernel->data;
++    if (kernel->type == GGML_TYPE_F16) {
++        w_f32.alloc(ggml_nelements(kernel));
++        ggml_get_to_fp32_cuda(GGML_TYPE_F16)(kernel->data, w_f32.get(), ggml_nelements(kernel), ctx.stream());
++        w_ptr = w_f32.get();
++    }
++
++    cudnnTensorDescriptor_t x_desc, y_desc;
++    cudnnFilterDescriptor_t w_desc;
++    cudnnConvolutionDescriptor_t conv_desc;
++    checked(cudnnCreateTensorDescriptor(&x_desc));
++    checked(cudnnCreateTensorDescriptor(&y_desc));
++    checked(cudnnCreateFilterDescriptor(&w_desc));
++    checked(cudnnCreateConvolutionDescriptor(&conv_desc));
++    // ggml ne = [W, H, C, N]; contiguous, W fastest => cuDNN NCHW / KCRS with the same memory order.
++    checked(cudnnSetTensor4dDescriptor(x_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT,
++        (int) input->ne[3], (int) input->ne[2], (int) input->ne[1], (int) input->ne[0]));
++    checked(cudnnSetTensor4dDescriptor(y_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT,
++        (int) dst->ne[3], (int) dst->ne[2], (int) dst->ne[1], (int) dst->ne[0]));
++    checked(cudnnSetFilter4dDescriptor(w_desc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW,
++        (int) kernel->ne[3], (int) kernel->ne[2], (int) kernel->ne[1], (int) kernel->ne[0]));
++    const int32_t * p = (const int32_t *) dst->op_params; // stride_x, stride_y, pad_x, pad_y, dil_x, dil_y
++    checked(cudnnSetConvolution2dDescriptor(conv_desc, p[3], p[2], p[1], p[0], p[5], p[4],
++        CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT));
++#if defined(CUDNN_VERSION) && CUDNN_VERSION >= 8200
++    checked(cudnnSetConvolutionMathType(conv_desc, CUDNN_FMA_MATH));  // plain FP32 FMA, never a tensor-op / TF32 path
++#else
++    checked(cudnnSetConvolutionMathType(conv_desc, CUDNN_DEFAULT_MATH));
++#endif
++
++    // same shape -> same algorithm for the whole run (tiles of equal size never differ in summation scheme)
++    using key_t = std::array<int, 17>;
++    thread_local std::map<key_t, std::pair<cudnnConvolutionFwdAlgo_t, size_t>> algo_cache;
++    const key_t key = {(int) input->ne[0], (int) input->ne[1], (int) input->ne[2], (int) input->ne[3],
++                       (int) kernel->ne[0], (int) kernel->ne[1], (int) kernel->ne[3], p[0], p[1], p[2], p[3], p[4], p[5],
++                       (int) kernel->type, 0, 0, 0};
++    cudnnConvolutionFwdAlgo_t chosen = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM;
++    size_t ws_bytes = 0;
++    bool found = false;
++    auto cached = algo_cache.find(key);
++    if (cached != algo_cache.end()) {
++        chosen   = cached->second.first;
++        ws_bytes = cached->second.second;
++        found    = true;
++    } else {
++        cudnnConvolutionFwdAlgoPerf_t cand[8];
++        int n_cand = 0;
++        const auto t_query = std::chrono::steady_clock::now();
++        checked(cudnnGetConvolutionForwardAlgorithm_v7(handle, x_desc, w_desc, conv_desc, y_desc, 8, &n_cand, cand));
++        if (timing_on) {
++            fprintf(stderr, "cudnn timing: algorithm query %.1f ms\n", ms_since(t_query));
++        }
++        for (int i = 0; i < n_cand && !found; ++i) {
++            if (cand[i].status != CUDNN_STATUS_SUCCESS || !ggml_cuda_cudnn_algo_allowed(cand[i].algo)) {
++                continue;
++            }
++            size_t need = 0;
++            if (cudnnGetConvolutionForwardWorkspaceSize(handle, x_desc, w_desc, conv_desc, y_desc, cand[i].algo, &need) != CUDNN_STATUS_SUCCESS) {
++                continue;
++            }
++            if (need <= ws_cap) {
++                chosen   = cand[i].algo;
++                ws_bytes = need;
++                found    = true;
++            }
++        }
++        if (found) {
++            algo_cache[key] = {chosen, ws_bytes};
++        }
++    }
++    if (!found) {
++        checked(cudnnDestroyConvolutionDescriptor(conv_desc));
++        checked(cudnnDestroyFilterDescriptor(w_desc));
++        checked(cudnnDestroyTensorDescriptor(y_desc));
++        checked(cudnnDestroyTensorDescriptor(x_desc));
++        return false;
++    }
++    ggml_cuda_pool_alloc<uint8_t> ws(ctx.pool());
++    if (ws_bytes) {
++        ws.alloc(ws_bytes);
++    }
++    static const bool verbose = getenv("GGML_CUDA_CUDNN_LOG") != nullptr;
++    if (verbose) {
++        fprintf(stderr, "cudnn conv2d: x[%lld,%lld,%lld,%lld] w[%lld,%lld,%lld,%lld] algo %d ws %zu KiB\n",
++            (long long) input->ne[0], (long long) input->ne[1], (long long) input->ne[2], (long long) input->ne[3],
++            (long long) kernel->ne[0], (long long) kernel->ne[1], (long long) kernel->ne[2], (long long) kernel->ne[3],
++            (int) chosen, ws_bytes >> 10);
++    }
++    const float alpha = 1.0f, beta = 0.0f;
++    static bool first_forward = true;
++    const bool time_this = timing_on && first_forward;
++    first_forward = false;
++    const auto t_fwd = std::chrono::steady_clock::now();
++    const cudnnStatus_t st = cudnnConvolutionForward(handle, &alpha, x_desc, input->data, w_desc, w_ptr, conv_desc,
++        chosen, ws.get(), ws_bytes, &beta, y_desc, dst->data);
++    checked(st);
++    if (time_this) {
++        cudaStreamSynchronize(ctx.stream());  // only the very first forward call is synchronised, for the timing
++        fprintf(stderr, "cudnn timing: first forward (launch + sync) %.1f ms\n", ms_since(t_fwd));
++    }
++    checked(cudnnDestroyConvolutionDescriptor(conv_desc));
++    checked(cudnnDestroyFilterDescriptor(w_desc));
++    checked(cudnnDestroyTensorDescriptor(y_desc));
++    checked(cudnnDestroyTensorDescriptor(x_desc));
++    return true;
++}
++#endif // GGML_CUDA_CUDNN_CONV2D_F32
++
+ struct conv_params {
+     const int64_t IW, IH;
+     const int64_t OW, OH;
+@@ -335,6 +503,15 @@ static void conv2d_cuda_f32(const float * X_D, const float * K_D, float * Y_D, c
+ }
+ 
+ void ggml_cuda_op_conv2d(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++#ifdef GGML_CUDA_CUDNN_CONV2D_F32
++    if (ggml_cuda_cudnn_conv2d_enabled() && dst->type == GGML_TYPE_F32 && dst->src[1]->type == GGML_TYPE_F32 &&
++        (dst->src[0]->type == GGML_TYPE_F32 || dst->src[0]->type == GGML_TYPE_F16) &&
++        ggml_is_contiguous(dst->src[0]) && ggml_is_contiguous(dst->src[1]) && ((const int32_t *) dst->op_params)[6] == 0) {
++        if (conv2d_cudnn_f32(ctx, dst)) {
++            return;
++        }
++    }
++#endif
+     const ggml_tensor * kernel = dst->src[0];
+     const ggml_tensor * input  = dst->src[1];
+     float *             K_D    = (float *) kernel->data;
+diff --git a/src/ggml-cuda/conv3d.cu b/src/ggml-cuda/conv3d.cu
+index 7e4bd57a..21161417 100644
+--- a/src/ggml-cuda/conv3d.cu
++++ b/src/ggml-cuda/conv3d.cu
+@@ -1,6 +1,7 @@
+ #include "conv3d.cuh"
+ #include "convert.cuh"
+ #include "mma.cuh"
++#include <cstdlib>
+ 
+ struct conv3d_params {
+     int64_t IW, IH, ID;
+@@ -230,6 +231,173 @@ static __global__ void conv3d_implicit_gemm_f16(const half * __restrict__ input,
+     }
+ }
+ 
++// Implicit-GEMM SIMT conv3d kernel for Pascal (sm_61, no tensor cores).
++// SAME as the stock kernel in: 64x64 output tile, 128 threads, same grid/split_k, same k summation order
++// (per output: k increasing, FMA, f32 accumulation, then the split_k partial sums in order) -> bit-identical result.
++// Differences: shared memory holds f32 (the conversion happens at load time, not in the inner loop), k-major layout
++// allows LDS.128, global loads for the next tile are prefetched into registers, and the k -> input offset is
++// computed once per tile.
++// conv3d_params and ggml_cuda_get_physical_warp_size must already be defined (it is called from within conv3d.cu).
++template <int KW, int KH, int KD>
++static __global__ void __launch_bounds__(128, 4) conv3d_implicit_gemm_f16_simt(const half * __restrict__ input,
++                                                                              const half * __restrict__ weight,
++                                                                              float * __restrict__ output,
++                                                                              const conv3d_params P,
++                                                                              const int           split_k,
++                                                                              const bool          aligned_weights) {
++    constexpr int BM = 64, BN = 64, BKO = 64, BK = 32, LD = BN + 4;  // BKO: stock tile; split boundaries are defined by it
++    __shared__ __align__(16) float a_s[BK][LD];   // a_s[k][m]
++    __shared__ __align__(16) float b_s[BK][LD];   // b_s[k][n]
++    __shared__ int                 offs_s[2][BK]; // k -> input offset (-1: invalid)
++
++    const int tid = threadIdx.y * 32 + threadIdx.x;
++    const int iw = int(P.IW), ih = int(P.IH), id = int(P.ID);
++    const int ow = int(P.OW), oh = int(P.OH), od = int(P.OD);
++    const int kw = KW ? KW : int(P.KW), kh = KH ? KH : int(P.KH), kd = KD ? KD : int(P.KD);
++    const int ic = int(P.IC), oc = int(P.OC);
++    const int sx = int(P.ST_X), sy = int(P.ST_Y), sz = int(P.ST_Z);
++    const int dx = int(P.DL_X), dy = int(P.DL_Y), dz = int(P.DL_Z);
++    const int n_b = blockIdx.z / split_k, split = blockIdx.z % split_k;
++    const int m0 = blockIdx.y * BM, n0 = blockIdx.x * BN;
++    const int k_total = ic * kw * kh * kd;
++    const int S       = ow * oh * od;
++
++    // same split boundaries as the stock kernel (counted in tiles of 64)
++    const int tiles = (k_total + BKO - 1) / BKO;
++    const int begin = int(int64_t(tiles) * split / split_k) * BKO;
++    const int end   = int(int64_t(tiles) * (split + 1) / split_k) * BKO;
++
++    // B load position of this thread: n = tid % 64, k rows tid/64 + 2*it
++    const int  nb      = tid & 63;
++    const int  spatial = n0 + nb;
++    const bool nvalid  = spatial < S;
++    int        posn    = 0;
++    if (nvalid) {
++        const int z = spatial / (ow * oh), y = spatial / ow % oh, x = spatial % ow;
++        posn        = (z * sz * ih + y * sy) * iw + x * sx;
++    }
++    // A load position: row = tid % 64, k column = (tid/64)*8 + 16*p
++    const int arow = tid & 63;
++    const int acol = (tid >> 6) * 8;
++    // compute position: 4 (m) x 8 (n: 4 + 4)
++    const int tm = (tid >> 3) * 4, tn0 = (tid & 7) * 4, tn1 = 32 + (tid & 7) * 4;
++
++    float acc[4][8];
++#pragma unroll
++    for (int i = 0; i < 4; ++i) {
++#pragma unroll
++        for (int j = 0; j < 8; ++j) {
++            acc[i][j] = 0.0f;
++        }
++    }
++
++    auto decode_off = [&](int ki) -> int {
++        if (ki >= k_total) {
++            return -1;
++        }
++        const int ci = ki / (kw * kh * kd), kz = ki / (kw * kh) % kd, ky = ki / kw % kh, kx = ki % kw;
++        return ((n_b * ic + ci) * id + kz * dz) * ih * iw + ky * dy * iw + kx * dx;
++    };
++
++    unsigned short bv[16];
++    int4           av[2];
++
++    // load the global values for tile k0 into registers (offs_s[buf] must be ready)
++    auto load_global = [&](int k0, int buf) {
++#pragma unroll
++        for (int it = 0; it < 16; ++it) {
++            const int off = offs_s[buf][(tid >> 6) + 2 * it];
++            bv[it]        = (off >= 0 && nvalid) ? __ldg((const unsigned short *) input + (off + posn)) : (unsigned short) 0;
++        }
++        if (aligned_weights) {
++#pragma unroll
++            for (int p = 0; p < 2; ++p) {
++                const int col = k0 + acol + 16 * p;
++                av[p] = (m0 + arow < oc && col < k_total) ? __ldg(((const int4 *) weight) + ((int64_t(m0 + arow) * k_total + col) >> 3)) :
++                                                            make_int4(0, 0, 0, 0);
++            }
++        }
++    };
++
++    // write the registers to shared memory
++    auto store_smem = [&](int k0) {
++#pragma unroll
++        for (int it = 0; it < 16; ++it) {
++            b_s[(tid >> 6) + 2 * it][nb] = __half2float(__ushort_as_half(bv[it]));
++        }
++        if (aligned_weights) {
++#pragma unroll
++            for (int p = 0; p < 2; ++p) {
++                const half * h = (const half *) &av[p];
++#pragma unroll
++                for (int j = 0; j < 8; ++j) {
++                    a_s[acol + 16 * p + j][arow] = __half2float(h[j]);
++                }
++            }
++        } else {
++            // unaligned weights: scalar loads (same values as the stock kernel)
++#pragma unroll
++            for (int it = 0; it < 16; ++it) {
++                const int kk = (tid >> 6) + 2 * it;
++                float     v  = 0.0f;
++                if (m0 + arow < oc && k0 + kk < k_total) {
++                    v = __half2float(weight[int64_t(m0 + arow) * k_total + k0 + kk]);
++                }
++                a_s[kk][arow] = v;
++            }
++        }
++    };
++
++    if (begin < end) {
++        if (tid < BK) {
++            offs_s[0][tid] = decode_off(begin + tid);
++        }
++        __syncthreads();
++        load_global(begin, 0);
++        int buf = 0;
++        for (int k0 = begin; k0 < end; k0 += BK) {
++            store_smem(k0);
++            const bool has_next = k0 + BK < end;
++            if (has_next && tid < BK) {
++                offs_s[buf ^ 1][tid] = decode_off(k0 + BK + tid);
++            }
++            __syncthreads();
++            if (has_next) {
++                load_global(k0 + BK, buf ^ 1);
++            }
++#pragma unroll 8
++            for (int k = 0; k < BK; ++k) {
++                const float4 a4 = *(const float4 *) &a_s[k][tm];
++                const float4 b0 = *(const float4 *) &b_s[k][tn0];
++                const float4 b1 = *(const float4 *) &b_s[k][tn1];
++                const float  a[4] = { a4.x, a4.y, a4.z, a4.w };
++                const float  b[8] = { b0.x, b0.y, b0.z, b0.w, b1.x, b1.y, b1.z, b1.w };
++#pragma unroll
++                for (int i = 0; i < 4; ++i) {
++#pragma unroll
++                    for (int j = 0; j < 8; ++j) {
++                        acc[i][j] = fmaf(a[i], b[j], acc[i][j]);
++                    }
++                }
++            }
++            __syncthreads();
++            buf ^= 1;
++        }
++    }
++
++#pragma unroll
++    for (int i = 0; i < 4; ++i) {
++        const int co = m0 + tm + i;
++#pragma unroll
++        for (int j = 0; j < 8; ++j) {
++            const int pos = n0 + (j < 4 ? tn0 + j : tn1 + j - 4);
++            if (co < oc && pos < S) {
++                output[(int64_t(blockIdx.z) * oc + co) * S + pos] = acc[i][j];
++            }
++        }
++    }
++}
++
+ static __global__ void conv3d_reduce_split_k(const float * __restrict__ partial,
+                                              float * __restrict__ output,
+                                              const int total,
+@@ -261,6 +429,26 @@ static void conv3d_launch_implicit_gemm(const half *          input,
+     // Vector loads require both the base pointer and each weight row to be 16-byte aligned.
+     const bool aligned_weights = uintptr_t(weight) % sizeof(int4) == 0 &&
+                                  (params.IC * params.KW * params.KH * params.KD) % (sizeof(int4) / sizeof(half)) == 0;
++    if constexpr (!use_mma) {
++        // Pascal SIMT path: new kernel with a bit-identical result. GGML_CUDA_CONV3D_OLD=1 falls back to the stock kernel (for A/B measurement).
++        static const bool use_old = getenv("GGML_CUDA_CONV3D_OLD") != nullptr;
++        if (!use_old) {
++            if (params.KW == 3 && params.KH == 3 && params.KD == 3) {
++                conv3d_implicit_gemm_f16_simt<3, 3, 3>
++                    <<<grid, block, 0, stream>>>(input, weight, output, params, split_k, aligned_weights);
++            } else if (params.KW == 1 && params.KH == 1 && params.KD == 3) {
++                conv3d_implicit_gemm_f16_simt<1, 1, 3>
++                    <<<grid, block, 0, stream>>>(input, weight, output, params, split_k, aligned_weights);
++            } else if (params.KW == 1 && params.KH == 1 && params.KD == 1) {
++                conv3d_implicit_gemm_f16_simt<1, 1, 1>
++                    <<<grid, block, 0, stream>>>(input, weight, output, params, split_k, aligned_weights);
++            } else {
++                conv3d_implicit_gemm_f16_simt<0, 0, 0>
++                    <<<grid, block, 0, stream>>>(input, weight, output, params, split_k, aligned_weights);
++            }
++            return;
++        }
++    }
+     if (params.KW == 3 && params.KH == 3 && params.KD == 3) {
+         conv3d_implicit_gemm_f16<3, 3, 3, use_mma>
+             <<<grid, block, 0, stream>>>(input, weight, output, params, split_k, aligned_weights);
+diff --git a/src/ggml-cuda/fattn-common.cuh b/src/ggml-cuda/fattn-common.cuh
+index 8bfe7e30..d6bce097 100644
+--- a/src/ggml-cuda/fattn-common.cuh
++++ b/src/ggml-cuda/fattn-common.cuh
+@@ -981,7 +981,7 @@ template <int DV, int ncols1, int ncols2>
+ void launch_fattn(
+     ggml_backend_cuda_context & ctx, ggml_tensor * dst, fattn_kernel_t fattn_kernel, const int nwarps, const size_t nbytes_shared,
+     const int nbatch_fa, const bool need_f16_K, const bool need_f16_V, const bool stream_k, const bool use_sparse,
+-    const int warp_size = WARP_SIZE, const bool async_kv_preload = false
++    const int warp_size = WARP_SIZE, const bool async_kv_preload = false, const int force_max_blocks_per_sm = 0
+ ) {
+     constexpr int ncols = ncols1 * ncols2;
+ 
+@@ -1136,6 +1136,7 @@ void launch_fattn(
+     int max_blocks_per_sm = 1; // Max. number of active blocks limited by occupancy.
+     CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&max_blocks_per_sm, fattn_kernel, block_dim.x * block_dim.y * block_dim.z, nbytes_shared));
+     GGML_ASSERT(max_blocks_per_sm > 0);
++    if (force_max_blocks_per_sm > 0) { max_blocks_per_sm = force_max_blocks_per_sm; } // keep the parallel_blocks choice identical to the stock kernel when a caller forces the occupancy value
+     int parallel_blocks = max_blocks_per_sm;
+ 
+     const int64_t n_kv = use_sparse ? n_kv_max : K->ne[1];
+diff --git a/src/ggml-cuda/fattn-tile-a3.cuh b/src/ggml-cuda/fattn-tile-a3.cuh
+new file mode 100644
+index 00000000..83635835
+--- /dev/null
++++ b/src/ggml-cuda/fattn-tile-a3.cuh
+@@ -0,0 +1,317 @@
++// SPDX-License-Identifier: MIT
++// Hand-written flash-attention tile kernel for Pascal (sm_61, fp32 path).
++// Derived from the summation order of ggml's fattn-tile.cuh (ggml, MIT); the kernel body is independent code.
++//
++// Scope: DKQ = DV = 128, ncols2 = 1, no mask, no softcap, no sinks, K/V f16, Q f32.
++// It reproduces ggml fattn-tile's fp32 accumulation order (ncols1 = 32, nbatch_fa = 64, np = 1) exactly,
++// so its output is bit-identical to the stock kernel:
++//  - Q*scale in f32; KQ[kv][q] is ONE accumulator, an fmaf chain over k = 0..127 in increasing order.
++//  - per tile of 64 kv: KQ_max_new = max(old, max(KQ + OFFSET)); KQ_max_scale = expf(old - new); val = expf(KQ - new).
++//  - KQ_sum is kept per q as 32 "lane" partial sums: lane m receives kv = m and kv = 32 + m;
++//    sum[m] = sum[m]*scale + (0 + e(m) + e(32+m)).
++//  - VKQ[q][d] is ONE accumulator: multiplied by KQ_max_scale at the start of each tile, then fmaf over kv in increasing order.
++//  - at the end the lane sums are combined with ggml's warp_reduce_sum tree (xor 16, 8, 4, 2, 1);
++//    if gridDim.y == 1 the output is scaled by 1/sum, otherwise the raw partial VKQ and (max, sum) meta are written.
++// Block: 128 threads (32x4), 64 Q columns, 2-3 blocks per SM (static shared memory is exactly 32768 B).
++#pragma once
++#include "common.cuh"
++#include "fattn-common.cuh"
++
++#define A3_EXPF(x) expf(x)
++#define A3_D    128
++#define A3_BQ   64
++#define A3_BKV  64
++#define A3_NT   128
++#define A3_CK   32
++#define A3_VC   16
++
++template <bool KV_F32>   // KV_F32 = false: byte-for-byte the original F16 K/V kernel; true: K/V are read as F32 (no F16 rounding)
++__launch_bounds__(A3_NT, 3)
++static __global__ void flash_attn_tile_a3(
++        const char * Q_ptr,
++        const char * K_ptr,
++        const char * V_ptr,
++        const char * mask_ptr,
++        const char * sinks_ptr,
++        const int  * KV_max_ptr,
++        float      * dst_ptr,
++        float2     * dst_meta_ptr,
++        const float scale,
++        const float max_bias,
++        const float m0,
++        const float m1,
++        const uint32_t n_head_log2,
++        const float logit_softcap,
++        const int32_t ne00, const uint3   ne01, const int32_t ne02, const int32_t ne03,
++                            const int32_t nb01, const int32_t nb02, const int32_t nb03,
++        const int32_t ne10, const int32_t ne11, const int32_t ne12, const int32_t ne13,
++                            const int32_t nb11, const int32_t nb12, const int64_t nb13,
++                            const int32_t nb21, const int32_t nb22, const int64_t nb23,
++                            const int32_t ne31, const int32_t ne32, const int32_t ne33,
++                            const int32_t nb31, const int32_t nb32, const int64_t nb33) {
++#ifdef FLASH_ATTN_AVAILABLE
++    __shared__ __align__(16) float Qs[A3_CK][A3_BQ];          //  8 KB [k][q] chunk (re-read as 4 chunks per tile)
++    __shared__ __align__(16) float KVs[A3_CK*A3_BKV];         //  8 KB K chunk [k][kv]  /  V chunk [kv][d]
++    __shared__ __align__(16) float Ss[A3_BKV][A3_BQ];         // 16 KB e values [kv][q], 16 B column XOR swizzle
++
++    const int tid  = threadIdx.x + 32*threadIdx.y;
++    const int lane = threadIdx.x;
++    const int col_Q_0 = blockIdx.x * A3_BQ;
++    const int sequence = blockIdx.z / ne02;
++    const int head0    = blockIdx.z - sequence*ne02;
++    const int gqa_ratio = ne02 / ne12;
++    const char * Qb = Q_ptr + (int64_t) nb03*sequence + (int64_t) nb02*head0;
++    const char * Kb = K_ptr + nb13*sequence + (int64_t) nb12*(head0 / gqa_ratio);
++    const char * Vb = V_ptr + nb23*sequence + (int64_t) nb22*(head0 / gqa_ratio);
++    const int nkv = ne11;
++    const int pb = gridDim.y, pbi = blockIdx.y;
++
++    // QK mapping: kv {4kvg+i} U {32+4kvg+i} (i<4), q {4qg..4qg+3}
++    const int kvg = lane & 7, qg = (lane >> 3) + 4*threadIdx.y;
++    // PV mapping: d {4dg+i} U {64+4dg+i}, q {8qg2..8qg2+7}
++    const int dg = lane & 15, qg2 = (lane >> 4) + 2*threadIdx.y;
++
++    float KQ_max[4], KQ_sum[4][4];
++#pragma unroll
++    for (int b = 0; b < 4; ++b) {
++        KQ_max[b] = -FLT_MAX/2.0f;
++#pragma unroll
++        for (int i = 0; i < 4; ++i) KQ_sum[b][i] = 0.0f;
++    }
++    float O_acc[8][8];
++#pragma unroll
++    for (int a = 0; a < 8; ++a)
++#pragma unroll
++        for (int b = 0; b < 8; ++b) O_acc[a][b] = 0.0f;
++
++    ggml_cuda_pdl_sync();
++
++    const int ntiles = (nkv + A3_BKV - 1) / A3_BKV;
++    for (int t = pbi; t < ntiles; t += pb) {
++        const int kv0 = t * A3_BKV;
++        const int kv_sup = nkv - kv0;   // number of valid kv (>= 64 means a full tile)
++        const bool tail = kv_sup <= A3_BKV;   // ggml: the loop body covers full tiles (oob_check=false); the single remaining tile is the tail (oob_check=true)
++
++        float S[8][4];
++#pragma unroll
++        for (int a = 0; a < 8; ++a)
++#pragma unroll
++            for (int b = 0; b < 4; ++b) S[a][b] = 0.0f;
++
++        // ---- KQ = K^T Q ----
++#pragma unroll 1
++        for (int kc = 0; kc < A3_D; kc += A3_CK) {
++            if constexpr (KV_F32) {   // K chunk, F32 source: 16 floats per thread-half = 4 float4
++                const int kv = tid & 63, hh = tid >> 6;
++                const bool ok = kv < kv_sup;
++                const float4 * src = (const float4 *)(Kb + (int64_t)(kv0 + (ok ? kv : 0))*nb11 + (kc + hh*(A3_CK/2))*4);
++#pragma unroll
++                for (int c = 0; c < A3_CK/8; ++c) {
++                    const float4 f = ok ? src[c] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
++                    KVs[(hh*(A3_CK/2) + c*4 + 0)*A3_BKV + kv] = f.x;
++                    KVs[(hh*(A3_CK/2) + c*4 + 1)*A3_BKV + kv] = f.y;
++                    KVs[(hh*(A3_CK/2) + c*4 + 2)*A3_BKV + kv] = f.z;
++                    KVs[(hh*(A3_CK/2) + c*4 + 3)*A3_BKV + kv] = f.w;
++                }
++            } else {   // K chunk: lane -> kv row, half h -> half of k
++                const int kv = tid & 63, hh = tid >> 6;
++                const bool ok = kv < kv_sup;
++                const uint4 * src = (const uint4 *)(Kb + (int64_t)(kv0 + (ok ? kv : 0))*nb11 + (kc + hh*(A3_CK/2))*2);
++#pragma unroll
++                for (int c = 0; c < A3_CK/16; ++c) {
++                    uint4 u = ok ? src[c] : make_uint4(0, 0, 0, 0);
++                    const half2 * h = (const half2 *) &u;
++#pragma unroll
++                    for (int i = 0; i < 4; ++i) {
++                        const float2 f = __half22float2(h[i]);
++                        KVs[(hh*(A3_CK/2) + c*8 + i*2 + 0)*A3_BKV + kv] = f.x;
++                        KVs[(hh*(A3_CK/2) + c*8 + i*2 + 1)*A3_BKV + kv] = f.y;
++                    }
++                }
++            }
++            for (int idx = tid; idx < A3_BQ * (A3_CK/4); idx += A3_NT) {   // Q chunk, pre-multiplied by scale
++                const int q = idx % A3_BQ, k4 = idx / A3_BQ;
++                int qq = col_Q_0 + q; if (qq >= (int) ne01.z) qq = ne01.z - 1;
++                float4 v = *(const float4 *)(Qb + (int64_t) qq*nb01 + (kc + k4*4)*4);
++                v.x *= scale; v.y *= scale; v.z *= scale; v.w *= scale;
++                Qs[k4*4+0][q] = v.x; Qs[k4*4+1][q] = v.y; Qs[k4*4+2][q] = v.z; Qs[k4*4+3][q] = v.w;
++            }
++            __syncthreads();
++#pragma unroll
++            for (int k = 0; k < A3_CK; ++k) {
++                const float4 ka = *(const float4 *)&KVs[k*A3_BKV + 4*kvg];
++                const float4 kb = *(const float4 *)&KVs[k*A3_BKV + 32 + 4*kvg];
++                const float4 qv = *(const float4 *)&Qs[k][4*qg];
++                const float kk[8] = {ka.x, ka.y, ka.z, ka.w, kb.x, kb.y, kb.z, kb.w};
++                const float qq[4] = {qv.x, qv.y, qv.z, qv.w};
++#pragma unroll
++                for (int a = 0; a < 8; ++a)
++#pragma unroll
++                    for (int b = 0; b < 4; ++b) S[a][b] = __fmaf_rn(kk[a], qq[b], S[a][b]);
++            }
++            __syncthreads();
++        }
++
++        // ---- max / exp / sum (ggml order) ----
++        float scl[4];
++#pragma unroll
++        for (int b = 0; b < 4; ++b) {
++            float tmax = KQ_max[b];
++#pragma unroll
++            for (int a = 0; a < 8; ++a) {
++                const int m = a < 4 ? 4*kvg + a : 32 + 4*kvg + (a - 4);
++                if (m < kv_sup) {
++                    S[a][b] += 0.0f;
++                    tmax = fmaxf(tmax, S[a][b] + FATTN_KQ_MAX_OFFSET);
++                }
++            }
++            tmax = fmaxf(tmax, __shfl_xor_sync(0xFFFFFFFF, tmax, 1, 32));
++            tmax = fmaxf(tmax, __shfl_xor_sync(0xFFFFFFFF, tmax, 2, 32));
++            tmax = fmaxf(tmax, __shfl_xor_sync(0xFFFFFFFF, tmax, 4, 32));
++            const float KQ_max_scale = expf(KQ_max[b] - tmax);
++            KQ_max[b] = tmax;
++            scl[b] = KQ_max_scale;
++#pragma unroll
++            for (int i = 0; i < 4; ++i) {
++                const int m0_ = 4*kvg + i, m1_ = 32 + 4*kvg + i;
++                const float e0 = m0_ < kv_sup ? A3_EXPF(S[i][b]   - KQ_max[b]) : 0.0f;
++                const float e1 = m1_ < kv_sup ? A3_EXPF(S[4+i][b] - KQ_max[b]) : 0.0f;
++                float add = 0.0f;
++                add += e0;
++                add += e1;
++                KQ_sum[b][i] = KQ_sum[b][i]*KQ_max_scale + add;
++                S[i][b]   = e0;
++                S[4+i][b] = e1;
++            }
++        }
++        // e -> shared memory (kv row, q column, 16 B swizzled)
++#pragma unroll
++        for (int a = 0; a < 8; ++a) {
++            const int kv = a < 4 ? 4*kvg + a : 32 + 4*kvg + (a - 4);
++            *(float4 *)&Ss[kv][4*(qg ^ ((kv >> 2) & 7))] = make_float4(S[a][0], S[a][1], S[a][2], S[a][3]);
++        }
++        float * sScale = &Qs[0][0];            // Qs is free at this point
++        if (kvg == 0) {
++            *(float4 *)&sScale[4*qg] = make_float4(scl[0], scl[1], scl[2], scl[3]);
++        }
++        __syncthreads();
++        float sc8[8];
++        {
++            const float4 s0 = *(const float4 *)&sScale[8*qg2];
++            const float4 s1 = *(const float4 *)&sScale[8*qg2 + 4];
++            sc8[0] = s0.x; sc8[1] = s0.y; sc8[2] = s0.z; sc8[3] = s0.w; sc8[4] = s1.x; sc8[5] = s1.y; sc8[6] = s1.z; sc8[7] = s1.w;
++        }
++
++        // ---- VKQ += V^T e ----
++#pragma unroll 1
++        for (int vc = 0; vc < A3_BKV; vc += A3_VC) {
++            for (int idx = tid; idx < A3_VC * (A3_D/8); idx += A3_NT) {
++                const int row = idx / (A3_D/8), c = idx % (A3_D/8);
++                const int kvr = vc + row;
++                const bool ok = kvr < kv_sup;
++                if constexpr (KV_F32) {   // V chunk, F32 source: 8 floats = 2 float4 (32 B) per c
++                    const float4 * vs = (const float4 *)(Vb + (int64_t)(kv0 + (ok ? kvr : 0))*nb21 + c*32);
++                    const float4 g0 = ok ? vs[0] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
++                    const float4 g1 = ok ? vs[1] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
++                    *(float4 *)&KVs[row*A3_D + c*8]     = g0;
++                    *(float4 *)&KVs[row*A3_D + c*8 + 4] = g1;
++                } else {
++                uint4 u = ok ? *(const uint4 *)(Vb + (int64_t)(kv0 + kvr)*nb21 + c*16) : make_uint4(0, 0, 0, 0);
++                const half2 * h = (const half2 *) &u;
++                const float2 f0 = __half22float2(h[0]), f1 = __half22float2(h[1]), f2 = __half22float2(h[2]), f3 = __half22float2(h[3]);
++                *(float4 *)&KVs[row*A3_D + c*8]     = make_float4(f0.x, f0.y, f1.x, f1.y);
++                *(float4 *)&KVs[row*A3_D + c*8 + 4] = make_float4(f2.x, f2.y, f3.x, f3.y);
++                }
++            }
++            __syncthreads();
++#ifdef A3_VUNR16
++#pragma unroll 16
++#else
++#pragma unroll 8
++#endif
++            for (int r = 0; r < A3_VC; ++r) {
++                const float4 va = *(const float4 *)&KVs[r*A3_D + 4*dg];
++                const float4 vb = *(const float4 *)&KVs[r*A3_D + 64 + 4*dg];
++                const int rw = vc + r, sw = (rw >> 2) & 7;
++                const float4 sa = *(const float4 *)&Ss[rw][4*((2*qg2)     ^ sw)];
++                const float4 sb = *(const float4 *)&Ss[rw][4*((2*qg2 + 1) ^ sw)];
++                const float vv[8] = {va.x, va.y, va.z, va.w, vb.x, vb.y, vb.z, vb.w};
++                const float ss[8] = {sa.x, sa.y, sa.z, sa.w, sb.x, sb.y, sb.z, sb.w};
++                if (!tail && vc == 0 && r == 0) {
++                    // ggml "body" instantiation (oob_check=false): the rescale fuses into the first kv product as FFMA(O, scale, rounded V*e)
++#pragma unroll
++                    for (int a = 0; a < 8; ++a)
++#pragma unroll
++                        for (int b = 0; b < 8; ++b) O_acc[a][b] = __fmaf_rn(O_acc[a][b], sc8[a], __fmul_rn(ss[a], vv[b]));
++                } else {
++                    if (tail && vc == 0 && r == 0) {
++                        // ggml "tail" instantiation (oob_check=true): rescale with a separate FMUL, then a plain FMA chain
++#pragma unroll
++                        for (int a = 0; a < 8; ++a)
++#pragma unroll
++                            for (int b = 0; b < 8; ++b) O_acc[a][b] *= sc8[a];
++                    }
++#pragma unroll
++                    for (int a = 0; a < 8; ++a)
++#pragma unroll
++                        for (int b = 0; b < 8; ++b) O_acc[a][b] = __fmaf_rn(ss[a], vv[b], O_acc[a][b]);
++                }
++            }
++            __syncthreads();
++        }
++    }
++
++    // ---- lane sums: ggml warp_reduce_sum (xor 16,8,4,2,1) ----
++    float tot[4];
++#pragma unroll
++    for (int b = 0; b < 4; ++b) {
++        float s0 = KQ_sum[b][0], s1 = KQ_sum[b][1], s2 = KQ_sum[b][2], s3 = KQ_sum[b][3];
++        s0 += __shfl_xor_sync(0xFFFFFFFF, s0, 4, 32); s1 += __shfl_xor_sync(0xFFFFFFFF, s1, 4, 32);
++        s2 += __shfl_xor_sync(0xFFFFFFFF, s2, 4, 32); s3 += __shfl_xor_sync(0xFFFFFFFF, s3, 4, 32);
++        s0 += __shfl_xor_sync(0xFFFFFFFF, s0, 2, 32); s1 += __shfl_xor_sync(0xFFFFFFFF, s1, 2, 32);
++        s2 += __shfl_xor_sync(0xFFFFFFFF, s2, 2, 32); s3 += __shfl_xor_sync(0xFFFFFFFF, s3, 2, 32);
++        s0 += __shfl_xor_sync(0xFFFFFFFF, s0, 1, 32); s1 += __shfl_xor_sync(0xFFFFFFFF, s1, 1, 32);
++        s2 += __shfl_xor_sync(0xFFFFFFFF, s2, 1, 32); s3 += __shfl_xor_sync(0xFFFFFFFF, s3, 1, 32);
++        const float n0 = s0 + s2, n2 = s2 + s0, n1 = s1 + s3, n3 = s3 + s1;   // xor 2
++        tot[b] = n0 + n1;                                                      // xor 1 (n0 + n1 == n1 + n0)
++        (void) n2; (void) n3;
++    }
++    float * sInv = &Qs[0][0];     // Qs is free after the last tile; the PV loop ended with a __syncthreads
++    if (kvg == 0) {
++        float4 r;
++        r.x = pb == 1 ? 1.0f/tot[0] : 1.0f; r.y = pb == 1 ? 1.0f/tot[1] : 1.0f;
++        r.z = pb == 1 ? 1.0f/tot[2] : 1.0f; r.w = pb == 1 ? 1.0f/tot[3] : 1.0f;
++        *(float4 *)&sInv[4*qg] = r;
++        if (pb != 1) {
++#pragma unroll
++            for (int b = 0; b < 4; ++b) {
++                const int q = col_Q_0 + 4*qg + b;
++                if (q < (int) ne01.z) {
++                    const int j_dst_unrolled = ((sequence*int(ne01.z) + q)*ne02 + head0)*pb + pbi;
++                    dst_meta_ptr[j_dst_unrolled] = make_float2(KQ_max[b], tot[b]);
++                }
++            }
++        }
++    }
++    __syncthreads();
++    {
++        const float4 i0 = *(const float4 *)&sInv[8*qg2];
++        const float4 i1 = *(const float4 *)&sInv[8*qg2 + 4];
++        const float inv8[8] = {i0.x, i0.y, i0.z, i0.w, i1.x, i1.y, i1.z, i1.w};
++#pragma unroll
++        for (int a = 0; a < 8; ++a) {
++            const int q = col_Q_0 + 8*qg2 + a;
++            if (q < (int) ne01.z) {
++                const int j_dst_unrolled = ((sequence*int(ne01.z) + q)*ne02 + head0)*pb + pbi;
++                float4 w0, w1;
++                w0.x = O_acc[a][0]*inv8[a]; w0.y = O_acc[a][1]*inv8[a]; w0.z = O_acc[a][2]*inv8[a]; w0.w = O_acc[a][3]*inv8[a];
++                w1.x = O_acc[a][4]*inv8[a]; w1.y = O_acc[a][5]*inv8[a]; w1.z = O_acc[a][6]*inv8[a]; w1.w = O_acc[a][7]*inv8[a];
++                *(float4 *)&dst_ptr[(int64_t) j_dst_unrolled*A3_D + 4*dg]      = w0;
++                *(float4 *)&dst_ptr[(int64_t) j_dst_unrolled*A3_D + 64 + 4*dg] = w1;
++            }
++        }
++    }
++#else
++    NO_DEVICE_CODE;
++#endif // FLASH_ATTN_AVAILABLE
++}
+diff --git a/src/ggml-cuda/fattn-tile.cuh b/src/ggml-cuda/fattn-tile.cuh
+index b5ea915e..483b43b4 100644
+--- a/src/ggml-cuda/fattn-tile.cuh
++++ b/src/ggml-cuda/fattn-tile.cuh
+@@ -1,5 +1,6 @@
+ #include "common.cuh"
+ #include "fattn-common.cuh"
++#include "fattn-tile-a3.cuh"
+ 
+ // nbatch_fa == number of KQ rows to process per iteration
+ // nbatch_K == number of K columns to load in parallel for KQ calculation
+@@ -1145,6 +1146,37 @@ static __global__ void flash_attn_tile(
+ #endif // FLASH_ATTN_AVAILABLE
+ }
+ 
++// GGML_CUDA_A3_F32KV=1 (default off): a3 may take F32 K/V directly (no F16 rounding). Off: F32 K/V keeps the old route
++// (launch_fattn converts them to F16 first).
++static bool ggml_cuda_a3_f32kv_enabled() {
++    static const bool on = []() { const char * e = getenv("GGML_CUDA_A3_F32KV"); return e != nullptr && atoi(e) > 0; }();
++    return on;
++}
++
++static bool ggml_cuda_fattn_tile_a3_ok(const ggml_tensor * dst, const int cc) {
++    const ggml_tensor * Q = dst->src[0];
++    const ggml_tensor * K = dst->src[1];
++    const ggml_tensor * V = dst->src[2];
++    if (getenv("WAN_A3_ORIG")) { return false; }
++    if (fast_fp16_available(cc) || !GGML_CUDA_CC_IS_NVIDIA(cc) || cc < GGML_CUDA_CC_PASCAL) { return false; }
++    if (dst->src[3] || dst->src[4]) { return false; }
++    float max_bias = 0.0f, logit_softcap = 0.0f;
++    memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(float));
++    memcpy(&logit_softcap, (const float *) dst->op_params + 2, sizeof(float));
++    if (max_bias != 0.0f || logit_softcap != 0.0f) { return false; }
++    if (K->type == GGML_TYPE_F32 && V->type == GGML_TYPE_F32) {
++        if (!ggml_cuda_a3_f32kv_enabled()) { return false; }
++    } else if (K->type != GGML_TYPE_F16 || V->type != GGML_TYPE_F16) { return false; }
++    if (Q->type != GGML_TYPE_F32) { return false; }
++    if (Q->ne[0] != 128 || K->ne[0] != 128 || V->ne[0] != 128) { return false; }
++    if (Q->ne[2] % K->ne[2] != 0) { return false; }
++    for (int i = 1; i < 4; ++i) {
++        if (Q->nb[i] % 16 || K->nb[i] % 16 || V->nb[i] % 16) { return false; }
++    }
++    if (((uintptr_t) Q->data | (uintptr_t) K->data | (uintptr_t) V->data | (uintptr_t) dst->data) % 16) { return false; }
++    return true;
++}
++
+ template <int DKQ, int DV, int ncols2, bool use_logit_softcap>
+ static void launch_fattn_tile_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+     const ggml_tensor * Q = dst->src[0];
+@@ -1174,6 +1206,15 @@ static void launch_fattn_tile_switch_ncols1(ggml_backend_cuda_context & ctx, ggm
+ #endif // GGML_USE_HIP
+     {
+         if (Q->ne[1] > 16/ncols2) {
++            if constexpr (DKQ == 128 && DV == 128 && ncols2 == 1 && !use_logit_softcap) {
++                if (ggml_cuda_fattn_tile_a3_ok(dst, cc)) {
++                    const bool kv_f32 = dst->src[1]->type == GGML_TYPE_F32;   // a3_ok admits F32 K/V only together with V (and only if enabled)
++                    fattn_kernel_t fattn_kernel_a3 = kv_f32 ? (fattn_kernel_t) flash_attn_tile_a3<true> : (fattn_kernel_t) flash_attn_tile_a3<false>;
++                    launch_fattn<128, A3_BQ, 1>
++                        (ctx, dst, fattn_kernel_a3, A3_NT/32, nbytes_shared, A3_BKV, !kv_f32, !kv_f32, false, false, warp_size, false, 2);
++                    return;
++                }
++            }
+             constexpr int cols_per_block = 32;
+             const int nwarps    = ggml_cuda_fattn_tile_get_nthreads (DKQ, DV, cols_per_block, cc) / warp_size;
+             const int nbatch_fa = ggml_cuda_fattn_tile_get_nbatch_fa(DKQ, DV, cols_per_block, cc);
+@@ -1233,6 +1274,14 @@ static void launch_fattn_tile_switch_ncols1(ggml_backend_cuda_context & ctx, ggm
+     GGML_ABORT("fatal error");
+ }
+ 
++static bool ggml_cuda_fattn_a3_f32kv_active(const ggml_tensor * dst, const int cc) {
++    const ggml_tensor * Q = dst->src[0];
++    const ggml_tensor * K = dst->src[1];
++    const ggml_tensor * V = dst->src[2];
++    return K->type == GGML_TYPE_F32 && V->type == GGML_TYPE_F32 && K->ne[0] == 128 && V->ne[0] == 128 &&
++           Q->ne[1] > 16 && ggml_cuda_fattn_tile_a3_ok(dst, cc);
++}
++
+ template <int DKQ, int DV, bool use_logit_softcap>
+ static void launch_fattn_tile_switch_ncols2(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+     const ggml_tensor * KQV  = dst;
+diff --git a/src/ggml-cuda/fattn.cu b/src/ggml-cuda/fattn.cu
+index 99e25cbd..a9282c69 100644
+--- a/src/ggml-cuda/fattn.cu
++++ b/src/ggml-cuda/fattn.cu
+@@ -749,6 +749,10 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
+         case BEST_FATTN_KERNEL_MMA_F16:
+             need_f16_K = true;
+             need_f16_V = true;
++            if (kernel == BEST_FATTN_KERNEL_TILE && ggml_cuda_fattn_a3_f32kv_active(dst, ggml_cuda_info().devices[device].cc)) {
++                need_f16_K = false;   // a3 reads F32 K/V directly: no F16 conversion buffers
++                need_f16_V = false;
++            }
+             break;
+         case BEST_FATTN_KERNEL_VEC: {
+             const bool f16_fallback = ggml_cuda_get_fattn_vec_case(Q->ne[0], K->type, V->type) == nullptr;
+diff --git a/src/ggml-cuda/ggml-cuda.cu b/src/ggml-cuda/ggml-cuda.cu
+index 24ebc5ed..17b4dbe7 100644
+--- a/src/ggml-cuda/ggml-cuda.cu
++++ b/src/ggml-cuda/ggml-cuda.cu
+@@ -4785,8 +4785,64 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+     return 0;
+ }
+ 
++
++// ---- optime: per-op GPU time table (env GGML_CUDA_OPTIME=1, off = no effect). Needs GGML_CUDA_DISABLE_GRAPHS=1. ----
++#include <chrono>
++#include <map>
++#include <string>
++#include <vector>
++struct ggml_cuda_optime_item { std::string key; cudaEvent_t e0, e1; };
++static std::vector<ggml_cuda_optime_item> ggml_cuda_optime_pending;
++static std::map<std::string, std::pair<double,long>> ggml_cuda_optime_tab;
++static std::map<std::string, std::pair<double,long>> ggml_cuda_optime_host;
++static bool ggml_cuda_optime_on() {
++    static const bool on = [] { const char * e = getenv("GGML_CUDA_OPTIME"); return e && atoi(e) == 1; }();
++    return on;
++}
++static void ggml_cuda_optime_flush() {
++    for (auto & it : ggml_cuda_optime_pending) {
++        cudaEventSynchronize(it.e1);
++        float ms = 0; cudaEventElapsedTime(&ms, it.e0, it.e1);
++        auto & t = ggml_cuda_optime_tab[it.key]; t.first += ms; t.second++;
++        cudaEventDestroy(it.e0); cudaEventDestroy(it.e1);
++    }
++    ggml_cuda_optime_pending.clear();
++}
++static void ggml_cuda_optime_dump() {
++    ggml_cuda_optime_flush();
++    std::vector<std::pair<double,std::string>> v; double tot = 0;
++    for (auto & kv : ggml_cuda_optime_tab) { v.push_back({kv.second.first, kv.first + "  n=" + std::to_string(kv.second.second)}); tot += kv.second.first; }
++    std::sort(v.rbegin(), v.rend());
++    fprintf(stderr, "=== OPTIME total %.1f ms ===\n", tot);
++    for (auto & kv : ggml_cuda_optime_host) fprintf(stderr, "OPTIMEHOST %9.1f ms  %s  n=%ld\n", kv.second.first, kv.first.c_str(), kv.second.second);
++    for (auto & p : v) fprintf(stderr, "OPTIME %9.1f ms %5.1f%%  %s\n", p.first, 100.0*p.first/tot, p.second.c_str());
++}
++static void ggml_cuda_optime_push_key(const std::string & key, cudaEvent_t e0, cudaEvent_t e1) {
++    ggml_cuda_optime_pending.push_back({key, e0, e1});
++    if (ggml_cuda_optime_pending.size() > 4096) ggml_cuda_optime_flush();
++}
++static void ggml_cuda_optime_add_host(const std::string & key, double ms) {
++    auto & t = ggml_cuda_optime_host[key]; t.first += ms; t.second++;
++}
++static void ggml_cuda_optime_push(const ggml_tensor * n, cudaEvent_t e0, cudaEvent_t e1) {
++    static bool reg = [] { atexit(ggml_cuda_optime_dump); return true; }(); (void) reg;
++    char b[256];
++    const ggml_tensor * s0 = n->src[0]; const ggml_tensor * s1 = n->src[1];
++    snprintf(b, sizeof b, "%s dst[%lld,%lld,%lld,%lld]%s%s", ggml_op_name(n->op), (long long)n->ne[0], (long long)n->ne[1], (long long)n->ne[2], (long long)n->ne[3],
++        s0 ? (std::string(" s0=") + ggml_type_name(s0->type)).c_str() : "", s1 ? (std::string(" s1=") + ggml_type_name(s1->type)).c_str() : "");
++    ggml_cuda_optime_pending.push_back({b, e0, e1});
++    if (ggml_cuda_optime_pending.size() > 4096) ggml_cuda_optime_flush();
++}
++
+ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key) {
+     bool graph_evaluated_or_captured = false;
++    cudaEvent_t optime_g0 = nullptr, optime_g1 = nullptr;
++    std::chrono::steady_clock::time_point optime_h0;
++    if (ggml_cuda_optime_on() && !use_cuda_graph) {
++        cudaEventCreate(&optime_g0); cudaEventCreate(&optime_g1);
++        cudaEventRecord(optime_g0, cuda_ctx->stream());
++        optime_h0 = std::chrono::steady_clock::now();
++    }
+ 
+     // flag used to determine whether it is an integrated_gpu
+     const bool integrated            = ggml_cuda_info().devices[cuda_ctx->device].integrated;
+@@ -4925,6 +4981,11 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+                     continue;
+                 }
+ 
++                cudaEvent_t optime_e0 = nullptr, optime_e1 = nullptr;
++                if (ggml_cuda_optime_on() && !use_cuda_graph) {
++                    cudaEventCreate(&optime_e0); cudaEventCreate(&optime_e1);
++                    cudaEventRecord(optime_e0, cuda_ctx->stream());
++                }
+                 int nodes_to_skip = ggml_cuda_try_fuse(cuda_ctx, cgraph, i);
+ 
+                 if (nodes_to_skip != 0) {
+@@ -4934,6 +4995,13 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+                             nodes_to_skip + 1, ggml_op_name(node->op), node->name,
+                             ggml_op_name(cgraph->nodes[last_fused]->op), cgraph->nodes[last_fused]->name);
+ #endif
++                    if (optime_e0) {
++                        cudaEventRecord(optime_e1, cuda_ctx->stream());
++                        std::string fk = "FUSED";
++                        for (int fi = 0; fi <= nodes_to_skip; ++fi) { fk += " "; fk += ggml_op_name(cgraph->nodes[i + fi]->op); }
++                        char fb[96]; snprintf(fb, sizeof fb, " dst[%lld,%lld,%lld]", (long long) node->ne[0], (long long) node->ne[1], (long long) node->ne[2]);
++                        ggml_cuda_optime_push_key(fk + fb, optime_e0, optime_e1);
++                    }
+                     i += nodes_to_skip;
+                     continue;
+                 }
+@@ -4955,6 +5023,10 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+ #endif  // NDEBUG
+ 
+                 bool ok = ggml_cuda_compute_forward(*cuda_ctx, node);
++                if (optime_e0) {
++                    cudaEventRecord(optime_e1, cuda_ctx->stream());
++                    ggml_cuda_optime_push(node, optime_e0, optime_e1);
++                }
+                 if (!ok) {
+                     GGML_LOG_ERROR("%s: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
+                 }
+@@ -5001,6 +5073,14 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+         graph_evaluated_or_captured = true;
+ #endif  // USE_CUDA_GRAPH
+     }
++    if (optime_g0) {
++        cudaEventRecord(optime_g1, cuda_ctx->stream());
++        ggml_cuda_optime_push_key("GRAPH(all ops incl. gaps, events)", optime_g0, optime_g1);
++        cudaStreamSynchronize(cuda_ctx->stream());
++        const double hms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - optime_h0).count();
++        ggml_cuda_optime_add_host("GRAPH host wall (launch+run, after sync)", hms);
++        ggml_cuda_optime_flush();
++    }
+ }
+ 
+ #ifdef USE_CUDA_GRAPH
+diff --git a/src/ggml-cuda/im2col.cu b/src/ggml-cuda/im2col.cu
+index d377f285..8f7efb81 100644
+--- a/src/ggml-cuda/im2col.cu
++++ b/src/ggml-cuda/im2col.cu
+@@ -1,5 +1,8 @@
+ #include "im2col.cuh"
+ 
++#include <climits>
++#include <cstdlib>
++
+ #define MAX_GRIDDIM_Y 65535
+ #define MAX_GRIDDIM_Z 65535
+ 
+@@ -44,6 +47,57 @@ static  __global__ void im2col_kernel(
+     }
+ }
+ 
++// ---- im2col fast path (2D/1D). Same values as im2col_kernel (pure data movement + the same float->T conversion);
++// the int64 div/mod of (iic, ikh, ikw) is done once per thread in int32 and amortised over X_TILE output columns.
++// Env GGML_CUDA_IM2COL_FAST=0 selects the old kernel (unset or any other value = fast path). ----
++#define IM2COL_FAST_X_TILE 8
++
++static bool ggml_cuda_im2col_fast_enabled() {
++    static const bool on = [] { const char * e = getenv("GGML_CUDA_IM2COL_FAST"); return !(e && e[0] == '0'); }();
++    return on;
++}
++
++template <typename T, int X_TILE>
++static __global__ void im2col_xtile_kernel(
++        const float * __restrict__ x, T * __restrict__ dst,
++        int IC_KH_KW, int KH_KW, int KW, int IH, int IW, int OH, int OW,
++        int64_t IC_IH_IW, int64_t IH_IW,
++        int s0, int s1, int p0, int p1, int d0, int d1) {
++    const int c = blockIdx.x * blockDim.x + threadIdx.x; // = iic*KH*KW + ikh*KW + ikw (contiguous in dst)
++    if (c >= IC_KH_KW) {
++        return;
++    }
++    const int iic = c / KH_KW;
++    const int rem = c - iic * KH_KW;
++    const int ikh = rem / KW;
++    const int ikw = rem - ikh * KW;
++
++    const int iz  = blockIdx.z; // = in*OH + ioh
++    const int in  = iz / OH;
++    const int ioh = iz - in * OH;
++    const int base_iow = blockIdx.y * X_TILE;
++
++    const int iih = ioh * s1 + ikh * d1 - p1;
++    const bool h_ok = iih >= 0 && iih < IH;
++    const int64_t src_row = (int64_t) iic * IC_IH_IW + (int64_t) in * IH_IW + (int64_t) iih * IW; // only dereferenced if h_ok
++    const int64_t dst_row = ((int64_t) iz * OW + base_iow) * IC_KH_KW + c;
++
++#pragma unroll
++    for (int dx = 0; dx < X_TILE; ++dx) {
++        const int iow = base_iow + dx;
++        if (iow >= OW) {
++            return;
++        }
++        const int iiw = iow * s0 + ikw * d0 - p0;
++        const int64_t offset_dst = dst_row + (int64_t) dx * IC_KH_KW;
++        if (!h_ok || iiw < 0 || iiw >= IW) {
++            dst[offset_dst] = 0.0f;
++        } else {
++            dst[offset_dst] = x[src_row + iiw];
++        }
++    }
++}
++
+ // im2col: [N, IC, IH, IW] => [N, OH, OW, IC*KH*KW]
+ template <typename T>
+ static void im2col_cuda(const float * x, T* dst,
+@@ -54,6 +108,21 @@ static void im2col_cuda(const float * x, T* dst,
+     const int64_t N_OH = N * OH;
+     const int64_t KH_KW = KW*KH;
+     const int threads_per_block = MIN((int)IC_KH_KW, CUDA_IM2COL_BLOCK_SIZE);
++    if (ggml_cuda_im2col_fast_enabled() &&
++        IC_KH_KW <= INT_MAX && N_OH <= MAX_GRIDDIM_Z &&
++        (OW + IM2COL_FAST_X_TILE - 1) / IM2COL_FAST_X_TILE <= MAX_GRIDDIM_Y &&
++        (OW - 1) * (int64_t) s0 + (KW - 1) * (int64_t) d0 <= INT_MAX &&
++        (OH - 1) * (int64_t) s1 + (KH - 1) * (int64_t) d1 <= INT_MAX &&
++        IW <= INT_MAX && IH <= INT_MAX && OW <= INT_MAX && OH <= INT_MAX) {
++        const dim3 fast_blocks((unsigned) ((IC_KH_KW + 255) / 256),
++                               (unsigned) ((OW + IM2COL_FAST_X_TILE - 1) / IM2COL_FAST_X_TILE),
++                               (unsigned) N_OH);
++        im2col_xtile_kernel<T, IM2COL_FAST_X_TILE><<<fast_blocks, 256, 0, stream>>>(
++            x, dst, (int) IC_KH_KW, (int) KH_KW, (int) KW, (int) IH, (int) IW, (int) OH, (int) OW,
++            IC_IH_IW, IH_IW, s0, s1, p0, p1, d0, d1);
++        return;
++    }
++
+     dim3 block_nums(MIN(OW, MAX_GRIDDIM_Y), MIN(N_OH, MAX_GRIDDIM_Z));
+ 
+     im2col_kernel<<<block_nums, threads_per_block, 0, stream>>>(
+diff --git a/src/ggml-cuda/mmq-config-pascal-dp4a.cuh b/src/ggml-cuda/mmq-config-pascal-dp4a.cuh
+index 83eb7c14..622c4d1d 100644
+--- a/src/ggml-cuda/mmq-config-pascal-dp4a.cuh
++++ b/src/ggml-cuda/mmq-config-pascal-dp4a.cuh
+@@ -81,7 +81,7 @@ static constexpr __host__ __device__ ggml_cuda_mmq_config ggml_cuda_mmq_get_conf
+     CASE(GGML_TYPE_Q8_0, 256, 2, 64,  32, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, false, false);
+     CASE(GGML_TYPE_Q8_0, 256, 2, 64,  40, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, false, false);
+     CASE(GGML_TYPE_Q8_0, 256, 2, 64,  48, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, false, false);
+-    CASE(GGML_TYPE_Q8_0, 256, 2, 64,  64, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, false, false);
++    CASE(GGML_TYPE_Q8_0, 256, 2, 128, 64, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, false, false);
+ 
+ // ---------------------------------------------------------------------------------------------
+ 
+diff --git a/src/ggml.c b/src/ggml.c
+index 524db8d9..00936d40 100644
+--- a/src/ggml.c
++++ b/src/ggml.c
+@@ -4803,7 +4803,10 @@ struct ggml_tensor * ggml_conv_2d(
+         int                   p1,
+         int                   d0,
+         int                   d1) {
+-    struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, s1, p0, p1, d0, d1, true, a->type == GGML_TYPE_BF16 ? GGML_TYPE_F32 : GGML_TYPE_F16); // [N, OH, OW, IC * KH * KW]
++    // hiz 0020: F32 kernel + env SD_CONV2D_F32=1 -> F32 im2col (default unchanged: F16)
++    const char * conv2d_f32_env = getenv("SD_CONV2D_F32");
++    const int conv2d_f32 = (conv2d_f32_env != NULL && conv2d_f32_env[0] == '1') ? 1 : 0;
++    struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, s1, p0, p1, d0, d1, true, (a->type == GGML_TYPE_BF16 || (conv2d_f32 && a->type == GGML_TYPE_F32)) ? GGML_TYPE_F32 : GGML_TYPE_F16); // [N, OH, OW, IC * KH * KW]
+ 
+     struct ggml_tensor * result =
+         ggml_mul_mat(ctx,
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 0f990e05..01debd8c 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -63,7 +63,7 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
+         static const size_t n_threads = std::max<size_t>(1, std::min<size_t>(nels/1024, std::min<size_t>(4, N_THREADS/2)));
+ 
+         auto init_thread = [&](size_t start, size_t end) {
+-            thread_local std::default_random_engine gen(std::random_device{}());
++            std::default_random_engine gen(getenv("WAN_A3") ? (unsigned)(start*7919u + nels + 17u) : std::random_device{}());
+             std::uniform_real_distribution<float> distribution(min, max);
+             for (size_t i = start; i < end; i++) {
+                 data[i] = distribution(gen);
+@@ -1638,6 +1638,13 @@ struct test_case {
+             return false;
+         }
+ 
++        if (getenv("WAN_A3")) {
++            std::vector<uint8_t> hb(ggml_nbytes(out));
++            ggml_backend_tensor_get(out, hb.data(), 0, hb.size());
++            uint64_t h = 1469598103934665603ULL;
++            for (uint8_t c : hb) { h ^= c; h *= 1099511628211ULL; }
++            printf("A3_HASH %s %s %016llx\n", current_op_name.c_str(), vars().c_str(), (unsigned long long) h);
++        }
+         // determine number of runs
+         int n_runs;
+         bool is_cpu = ggml_backend_dev_type(ggml_backend_get_device(backend)) == GGML_BACKEND_DEVICE_TYPE_CPU;
+@@ -12055,6 +12062,37 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+ // Test cases for performance evaluation: should be representative of real-world use cases
+ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+     std::vector<std::unique_ptr<test_case>> test_cases;
++    if (getenv("WAN_A3_KUCUK")) { // bit-divergence search: a single Q tile, small kv
++        for (int64_t kv : {32, 64, 128, 192, 1024}) {
++            test_cases.emplace_back(new test_flash_attn_ext(128, 128, 1, {1, 1}, kv, 32, false, false, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
++        }
++        return test_cases;
++    }
++    if (getenv("ZIMG")) { // Z-Image-Turbo (768x1344): N = 4162 / 4160
++        for (int64_t N : {4162, 4160, 4096}) {
++            test_cases.emplace_back(new test_flash_attn_ext(128, 128, 30, {1, 1}, N, N, false, false, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
++        }
++        for (int64_t N : {4162, 4160}) {
++            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 11520, N, 3840, {1, 1}, {1, 1}));
++            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 3840, N, 3840, {1, 1}, {1, 1}));
++            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 10240, N, 3840, {1, 1}, {1, 1}));
++            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 3840, N, 10240, {1, 1}, {1, 1}));
++        }
++        return test_cases;
++    }
++    if (getenv("WAN_A3")) { // Wan 2.2 TI2V-5B real shapes (121 / 49 / 17 frames)
++        for (int64_t N : {12090, 5070, 1950}) {
++            test_cases.emplace_back(new test_flash_attn_ext(128, 128, 24, {1, 1}, N, N, false, false, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
++        }
++        test_cases.emplace_back(new test_flash_attn_ext(128, 128, 24, {1, 1}, 512, 12090, false, false, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
++        for (int64_t N : {12090, 5070, 1950}) {
++            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 3072, N, 3072, {1, 1}, {1, 1}));
++            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 14336, N, 3072, {1, 1}, {1, 1}));
++            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 3072, N, 14336, {1, 1}, {1, 1}));
++        }
++        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 3072, 512, 4096, {1, 1}, {1, 1}));
++        return test_cases;
++    }
+ 
+     // SWIGLU at a 27B-class FFN width, fused [gate|up] vs split operands
+     // note: same bytes either way, so a backend that indexes them differently shows it here
+-- 
+2.51.0.windows.2
+

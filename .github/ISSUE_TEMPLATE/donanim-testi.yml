@@ -1,0 +1,29 @@
+name: Hardware test / Donanim testi
+description: Report a run on your GPU
+body:
+  - type: input
+    id: gpu
+    attributes:
+      label: "GPU, VRAM, driver / Kart, VRAM, surucu"
+    validations:
+      required: true
+  - type: input
+    id: kare
+    attributes:
+      label: "Frame count, total time, VRAM peak, RAM peak / Kare sayisi, sure, VRAM ve RAM tepesi"
+    validations:
+      required: true
+  - type: dropdown
+    id: kapi
+    attributes:
+      label: "Quality gates / Kalite kapilari"
+      options:
+        - "passed / gecti"
+        - "failed / gecmedi"
+        - "not run / kosulmadi"
+    validations:
+      required: true
+  - type: textarea
+    id: not
+    attributes:
+      label: "Notes / Notlar"

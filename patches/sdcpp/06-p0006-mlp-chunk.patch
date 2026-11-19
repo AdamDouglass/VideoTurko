@@ -1,0 +1,35 @@
+From 76ed0fc6be91615c3c7bf1260680ad2cab21ced6 Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Wed, 18 Nov 2026 22:36:39 +0300
+Subject: [PATCH 08/23] 0006: SD_MLP_CHUNK_MB env caps MLP token chunk (default
+ off)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/model/diffusion/minimax_h3.hpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/model/diffusion/minimax_h3.hpp b/src/model/diffusion/minimax_h3.hpp
+index 2f5cb4f..bc422f8 100644
+--- a/src/model/diffusion/minimax_h3.hpp
++++ b/src/model/diffusion/minimax_h3.hpp
+@@ -276,6 +276,16 @@ namespace MiniMaxH3 {
+                 size_t alignment    = ggml_backend_buft_get_alignment(buft);
+                 size_t chunk_budget = ggml_backend_buft_get_max_size(buft);
+                 chunk_budget -= chunk_budget % alignment;
++                // SD_MLP_CHUNK_MB (default off): cap the token chunk so fc1/swiglu intermediates stay small (VRAM peak at long videos).
++                {
++                    static const size_t mlp_chunk_cap = [] {
++                        const char* e = std::getenv("SD_MLP_CHUNK_MB");
++                        return (e != nullptr && e[0] != '\0') ? static_cast<size_t>(std::atoll(e)) * 1024ULL * 1024ULL : static_cast<size_t>(0);
++                    }();
++                    if (mlp_chunk_cap > 0) {
++                        chunk_budget = std::min(chunk_budget, std::max<size_t>(alignment, mlp_chunk_cap));
++                    }
++                }
+                 // Use the backend's preferred allocation size as a conservative chunk budget.
+                 // Matmul outputs are F32 even for quantized weights.
+                 size_t token_bytes = ggml_row_size(GGML_TYPE_F32, std::max(x->ne[0], 2 * ffn_hidden_size)) * x->ne[2] * x->ne[3];
+-- 
+2.51.0.windows.2
+

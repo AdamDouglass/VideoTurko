@@ -1,0 +1,35 @@
+From e0a5bff31b33d415f396b6f85bac14a47ad00e39 Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Thu, 19 Nov 2026 14:44:29 +0300
+Subject: [PATCH 20/23] 0017: SD_CUT_CACHE_HOST_MB also excludes host-captured
+ cut tensors from the device capacity estimate (default off)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/core/runner_cache.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/core/runner_cache.cpp b/src/core/runner_cache.cpp
+index 6e1b94e..1fd8f46 100644
+--- a/src/core/runner_cache.cpp
++++ b/src/core/runner_cache.cpp
+@@ -227,6 +227,16 @@ namespace sd {
+                 continue;
+             }
+             ggml_tensor* source      = ggml_graph_cut::cache_source_tensor(output);
++            // SD_CUT_CACHE_HOST_MB: such tensors are captured into host RAM (CachedTensor::copy), so they do not need device memory.
++            {
++                static const long long host_min_mb = [] {
++                    const char* e = std::getenv("SD_CUT_CACHE_HOST_MB");
++                    return (e != nullptr && e[0] != '\0') ? std::atoll(e) : 0LL;
++                }();
++                if (host_min_mb > 0 && ggml_nbytes(source) >= static_cast<size_t>(host_min_mb) * 1024ULL * 1024ULL) {
++                    continue;
++                }
++            }
+             const size_t tensor_size = GGML_PAD(
+                 ggml_backend_buft_get_alloc_size(buffer_type, source), alignment);
+             total_size = tensor_size > SIZE_MAX - total_size ? SIZE_MAX : total_size + tensor_size;
+-- 
+2.51.0.windows.2
+

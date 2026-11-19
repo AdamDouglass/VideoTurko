@@ -1,0 +1,42 @@
+From 8fd76fe64fb859d2abbcd70beb38da67eb17a85f Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Thu, 19 Nov 2026 00:42:50 +0300
+Subject: [PATCH 13/23] 0010: SD_H3_DROP_QUEUED drop queued prefetch when
+ capacity gate fails (default off)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/core/segment_weight_pipeline.cpp | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/src/core/segment_weight_pipeline.cpp b/src/core/segment_weight_pipeline.cpp
+index 5475536..787bbd5 100644
+--- a/src/core/segment_weight_pipeline.cpp
++++ b/src/core/segment_weight_pipeline.cpp
+@@ -168,7 +168,22 @@ namespace sd {
+         for (const auto& request : requests) {
+             if (!manager->ensure_compute_backend_capacity(request, segment_params_[segment_index],
+                                                           preferred_eviction_order(), protected_params)) {
+-                return false;
++                // SD_H3_DROP_QUEUED=1 (default off). Logs (E2k2/E2m2/E2o, 141/124 frames) show 'tracked weights 318.71 MB' (25 tensors,
++                // condition_proj + token_refiner) staying resident through the first DiT block gates: it is the queued prefetch
++                // (queued_segment_ != this segment, so activate() leaves it queued and protected). When the gate fails, drop the
++                // queued prefetch, switch prefetching off for this run (weights then load on demand) and retry once.
++                static const bool drop_queued = [] {
++                    const char* e = std::getenv("SD_H3_DROP_QUEUED");
++                    return e != nullptr && e[0] != '\0' && e[0] != '0';
++                }();
++                if (!drop_queued || queued_params_.empty()) {
++                    return false;
++                }
++                disable();
++                if (!manager->ensure_compute_backend_capacity(request, segment_params_[segment_index],
++                                                              preferred_eviction_order(), segment_params_[segment_index])) {
++                    return false;
++                }
+             }
+         }
+         return true;
+-- 
+2.51.0.windows.2
+

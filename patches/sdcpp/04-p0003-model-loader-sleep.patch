@@ -1,0 +1,55 @@
+From 7d61904edc0fa7762f6f759fad2c221007434542 Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Tue, 17 Nov 2026 21:29:33 +0300
+Subject: [PATCH 04/23] model_loader: 200 ms yoklama uykusu 5 ms dilimlere
+ (bayt ayni, yalniz zamanlama)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/model_loader.cpp | 24 ++++++++++++++++--------
+ 1 file changed, 16 insertions(+), 8 deletions(-)
+
+diff --git a/src/model_loader.cpp b/src/model_loader.cpp
+index 5987146..e7df95d 100644
+--- a/src/model_loader.cpp
++++ b/src/model_loader.cpp
+@@ -1407,20 +1407,28 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb,
+             });
+         }
+ 
++        // Poll in 5 ms slices; the progress bar is still redrawn every 200 ms (10 ms for <= 4 tensors).
++        // A single 200 ms sleep here used to add up to 0.2 s to every (even instant, mmap-backed) load call.
++        const int64_t report_interval_ms = total_tensors_to_process <= 4 ? 10 : 200;
++        int64_t last_report_ms           = -report_interval_ms;
+         while (true) {
+             size_t current_idx = tensor_idx.load();
+             if (current_idx >= tensors_to_process.size() || failed) {
+                 break;
+             }
+-            size_t curr_num       = total_tensors_processed + current_idx;
+-            float elapsed_seconds = (ggml_time_ms() - t_start) / 1000.0f;
+-            if (log_progress && total_tensors_to_process > 0) {
+-                pretty_bytes_progress(static_cast<int>(curr_num),
+-                                      static_cast<int>(total_tensors_to_process),
+-                                      bytes_processed.load(),
+-                                      elapsed_seconds);
++            const int64_t now_ms = ggml_time_ms();
++            if (now_ms - last_report_ms >= report_interval_ms) {
++                last_report_ms        = now_ms;
++                size_t curr_num       = total_tensors_processed + current_idx;
++                float elapsed_seconds = (now_ms - t_start) / 1000.0f;
++                if (log_progress && total_tensors_to_process > 0) {
++                    pretty_bytes_progress(static_cast<int>(curr_num),
++                                          static_cast<int>(total_tensors_to_process),
++                                          bytes_processed.load(),
++                                          elapsed_seconds);
++                }
+             }
+-            std::this_thread::sleep_for(std::chrono::milliseconds(total_tensors_to_process <= 4 ? 10 : 200));
++            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+         }
+ 
+         for (auto& w : workers) {
+-- 
+2.51.0.windows.2
+

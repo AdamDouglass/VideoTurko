@@ -1,0 +1,105 @@
+From 232ea14ab676438d903c6b9ac2e957749fe2f2da Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Thu, 19 Nov 2026 16:17:17 +0300
+Subject: [PATCH] 0019: SD_BLOCK_TAIL_FUSE (per-chunk block tail:
+ out_proj+residual+norm2+MLP+gated residual, default off)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/model/diffusion/minimax_h3.hpp | 73 ++++++++++++++++++++++++++++++
+ 1 file changed, 73 insertions(+)
+
+diff --git a/src/model/diffusion/minimax_h3.hpp b/src/model/diffusion/minimax_h3.hpp
+index 1c8d731..8623277 100644
+--- a/src/model/diffusion/minimax_h3.hpp
++++ b/src/model/diffusion/minimax_h3.hpp
+@@ -262,6 +262,32 @@ namespace MiniMaxH3 {
+             }
+         }
+ 
++        // Same chunk-size rule as forward(), for a [ne0, rows, ne2, ne3] input (used by the fused block tail, SD_BLOCK_TAIL_FUSE).
++        int64_t token_chunk_rows(GGMLRunnerContext* ctx, int64_t rows, int64_t ne0, int64_t ne2, int64_t ne3) const {
++            int64_t chunk_size = rows;
++            if (ctx->backend != nullptr) {
++                auto buft           = ggml_backend_get_default_buffer_type(ctx->backend);
++                size_t alignment    = ggml_backend_buft_get_alignment(buft);
++                size_t chunk_budget = ggml_backend_buft_get_max_size(buft);
++                chunk_budget -= chunk_budget % alignment;
++                {
++                    static const size_t mlp_chunk_cap = [] {
++                        const char* e = std::getenv("SD_MLP_CHUNK_MB");
++                        return (e != nullptr && e[0] != '\0') ? static_cast<size_t>(std::atoll(e)) * 1024ULL * 1024ULL : static_cast<size_t>(0);
++                    }();
++                    if (mlp_chunk_cap > 0) {
++                        chunk_budget = std::min(chunk_budget, std::max<size_t>(alignment, mlp_chunk_cap));
++                    }
++                }
++                size_t token_bytes = ggml_row_size(GGML_TYPE_F32, std::max(ne0, 2 * ffn_hidden_size)) * ne2 * ne3;
++                chunk_size         = static_cast<int64_t>(std::min<size_t>(chunk_size, std::max<size_t>(1, chunk_budget / token_bytes)));
++                if (chunk_size < rows && std::getenv("SD_MLP_CHUNK_MB") != nullptr) {
++                    chunk_size = (rows + (rows + chunk_size - 1) / chunk_size - 1) / ((rows + chunk_size - 1) / chunk_size);
++                }
++            }
++            return chunk_size;
++        }
++
+         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override {
+             auto fc1           = std::dynamic_pointer_cast<UnaryBlock>(blocks["fc1"]);
+             auto fc2           = std::dynamic_pointer_cast<UnaryBlock>(blocks["fc2"]);
+@@ -754,6 +780,53 @@ namespace MiniMaxH3 {
+                 return modulate(norm1->forward(ctx, input), rows[i], 0, 1);
+             });
+             auto attended = attn->attend(ctx, qkv, pe);
++            // SD_BLOCK_TAIL_FUSE=1 (default off): out_proj + residual + norm2/modulate + MLP + gated residual run per token chunk and are
++            // written into one preallocated output (set_inplace), so no full-length intermediates stay alive. Every op is per row with
++            // the same shapes/chunking as the unfused path (MLP chunk rule reused; tail chunks of <=8 rows disable the fusion).
++            {
++                static const bool tail_fuse = [] {
++                    const char* e = std::getenv("SD_BLOCK_TAIL_FUSE");
++                    return e != nullptr && e[0] == '1';
++                }();
++                bool can_fuse = tail_fuse && x->type == GGML_TYPE_F32 && x->ne[2] == 1 && x->ne[3] == 1;
++                std::vector<int64_t> chunk_rows;
++                int64_t total_rows = 0;
++                if (can_fuse) {
++                    for (const auto& segment : segments) {
++                        const int64_t nrows = segment.end - segment.start;
++                        const int64_t chunk = mlp->token_chunk_rows(ctx, nrows, config.hidden_size, 1, 1);
++                        if (chunk <= 0 || (nrows % chunk != 0 && nrows % chunk <= 8)) {
++                            can_fuse = false;
++                            break;
++                        }
++                        chunk_rows.push_back(chunk);
++                        total_rows += nrows;
++                    }
++                }
++                if (can_fuse) {
++                    ggml_tensor* packed = ggml_new_tensor_2d(ctx->ggml_ctx, GGML_TYPE_F32, config.hidden_size, total_rows);
++                    int64_t offset      = 0;
++                    for (size_t i = 0; i < segments.size(); ++i) {
++                        const auto& segment = segments[i];
++                        const int64_t nrows = segment.end - segment.start;
++                        for (int64_t start = 0; start < nrows; start += chunk_rows[i]) {
++                            const int64_t stop = std::min(start + chunk_rows[i], nrows);
++                            auto part          = ggml_ext_slice(ctx, attended, 1, segment.start + start, segment.start + stop, false);
++                            auto projection    = attn->project_output(ctx, part);
++                            auto input         = ggml_ext_slice(ctx, inputs[i], 1, start, stop, false);
++                            auto residual      = ggml_add(ctx->ggml_ctx, input,
++                                                          ggml_mul(ctx->ggml_ctx, projection, rows[i][2]));
++                            auto h             = modulate(norm2->forward(ctx, residual), rows[i], 3, 4);
++                            h                  = ggml_add(ctx->ggml_ctx, residual, ggml_mul(ctx->ggml_ctx, mlp->forward(ctx, h), rows[i][5]));
++                            packed             = ggml_set_inplace(ctx->ggml_ctx, packed, h, packed->nb[1], packed->nb[2], packed->nb[3],
++                                                                  static_cast<size_t>(offset + start) * packed->nb[1]);
++                            ctx->expand_graph(packed);
++                        }
++                        offset += nrows;
++                    }
++                    return packed;
++                }
++            }
+             std::vector<ggml_tensor*> projections;
+             for (const auto& segment : segments) {
+                 auto part = ggml_ext_slice(ctx, attended, 1, segment.start, segment.end, false);
+-- 
+2.51.0.windows.2
+

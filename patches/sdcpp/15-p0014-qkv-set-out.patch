@@ -1,0 +1,68 @@
+From dabea8c97ae0746c5b5ed6973dcbbb098f0fe3bf Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Thu, 19 Nov 2026 10:02:03 +0300
+Subject: [PATCH 17/23] 0014: SD_QKV_SET_OUT chunked q/k/v written into
+ preallocated tensors (default off)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/model/diffusion/minimax_h3.hpp | 43 ++++++++++++++++++++++++++++++
+ 1 file changed, 43 insertions(+)
+
+diff --git a/src/model/diffusion/minimax_h3.hpp b/src/model/diffusion/minimax_h3.hpp
+index b0ef3b2..e2653b4 100644
+--- a/src/model/diffusion/minimax_h3.hpp
++++ b/src/model/diffusion/minimax_h3.hpp
+@@ -406,6 +406,49 @@ namespace MiniMaxH3 {
+                 return split_qkv(ctx, projected);
+             }
+ 
++            // SD_QKV_SET_OUT=1 (default off, patch 0014): write every token chunk's q/k/v straight into three preallocated
++            // [head_dim, heads, sequence, batch] tensors (ggml_set_inplace, pure copy) instead of keeping all chunk copies alive and
++            // concatenating (that doubled q/k/v at the end: the QKV64 probe raised the pending size by 121 MB). The full packed QKV
++            // (86 KB/token) never exists; only q/k/v (3 x 28.7 KB/token) and one chunk's packed projection.
++            static const bool set_qkv = [] {
++                const char* e = std::getenv("SD_QKV_SET_OUT");
++                return e != nullptr && e[0] != '\0' && e[0] != '0';
++            }();
++            if (set_qkv) {
++                std::array<ggml_tensor*, 3> out{nullptr, nullptr, nullptr};
++                int64_t token_offset = 0;
++                for (size_t i = 0; i < inputs.size(); ++i) {
++                    auto input = inputs[i];
++                    for (int64_t start = 0; start < input->ne[1]; start += chunk_size) {
++                        auto part = ggml_ext_slice(ctx, input, 1, start, std::min(start + chunk_size, input->ne[1]), false);
++                        if (!ggml_is_contiguous(part)) {
++                            part = ggml_cont(ctx->ggml_ctx, part);
++                        }
++                        if (prepare_input) {
++                            part = prepare_input(part, i);
++                        }
++                        auto qkv = split_qkv(ctx, project_packed_qkv(ctx, part));
++                        const int64_t tokens = qkv[0]->ne[2];
++                        for (int j = 0; j < 3; ++j) {
++                            GGML_ASSERT(qkv[j]->type == GGML_TYPE_F32);
++                            auto piece = ggml_cont(ctx->ggml_ctx, qkv[j]);
++                            if (out[j] == nullptr) {
++                                out[j] = ggml_new_tensor_4d(ctx->ggml_ctx, GGML_TYPE_F32, piece->ne[0], piece->ne[1], sequence, piece->ne[3]);
++                            }
++                            out[j] = ggml_set_inplace(ctx->ggml_ctx, out[j], piece, out[j]->nb[1], out[j]->nb[2], out[j]->nb[3],
++                                                      static_cast<size_t>(token_offset) * out[j]->nb[2]);
++                        }
++                        // Finish this chunk (all three writes) before the next chunk's projection allocates.
++                        for (int j = 0; j < 3; ++j) {
++                            ctx->expand_graph(out[j]);
++                        }
++                        token_offset += tokens;
++                    }
++                }
++                GGML_ASSERT(token_offset == sequence);
++                return {out[0], out[1], out[2]};
++            }
++
+             // Split Q/K/V before concatenating tokens to avoid materializing the full packed QKV.
+             std::vector<ggml_tensor*> chunks[3];
+             for (size_t i = 0; i < inputs.size(); ++i) {
+-- 
+2.51.0.windows.2
+

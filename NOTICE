@@ -1,0 +1,29 @@
+This project (the VideoTurko repository and its release packages) consists of patches, scripts, documentation and compiled binaries built from them. It does not
+contain any model weights.
+
+MiniMax H3 is licensed under the MiniMax H3 Community License Agreement, Copyright © 2026 MiniMax. All Rights Reserved.
+(License text: https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE)
+This project is not affiliated with or endorsed by MiniMax. Use of the model and its outputs is governed by the MiniMax H3 Community License (territory excludes EU, UK, South Korea, US; see docs/LISANS_UYARISI.md).
+
+Third-party components the patches apply to or derive from:
+
+- stable-diffusion.cpp - MIT License, Copyright (c) 2023 leejet
+  https://github.com/leejet/stable-diffusion.cpp
+  The patches in patches/ are modifications of this code base and keep its MIT notice.
+- ggml - MIT License (ggml authors)
+  https://github.com/ggml-org/ggml
+- HyperFlow-H3-Flash - Apache License 2.0, Video-Rebirth
+  https://github.com/Video-Rebirth/hyperflow-h3-flash
+  (model: https://huggingface.co/VideoRebirthAI/hyperflow-h3-flash, under the MiniMax H3 Community License)
+- Patch 0002 is based on upstream stable-diffusion.cpp PR #2369 (VAE encode
+  launch overhead); credit to its author(s).
+- Qwen3-VL (text encoder used by MiniMax H3) - Apache License 2.0
+  https://github.com/QwenLM/Qwen3-VL
+
+All patches listed in patches/SERIES.txt (stable-diffusion.cpp series, ggml series, and any later experimental patch added to it, e.g. the memory patches 0015, 0019, 0020) are modifications of the MIT-licensed code above. They are distributed under the MIT License and keep the original copyright notices. Pinned sources: stable-diffusion.cpp commit 32d516c0197ed5ca31305b8575e14eb1451fad33, ggml commit d803c238f67915fb825a9aa4df27b99356d51597 (full MIT texts: LICENSE-sd.cpp, LICENSE-ggml in the release package).
+
+Release binary package: contains the compiled sd-cli and the licenses above. The NVIDIA CUDA runtime DLLs (cudart, cublas, cublasLt) are shipped unmodified in a separate package and are subject to the NVIDIA CUDA EULA (https://docs.nvidia.com/cuda/eula/index.html, Attachment A).
+
+Notice on the MIT license / MIT lisansı hakkında not:
+The MIT license in LICENSE does NOT cover the NVIDIA CUDA runtime DLLs (cudart64_12, cublas64_12, cublasLt64_12) or any other file provided by NVIDIA that is placed next to sd-cli.exe; they are distributed in a separate zip and are subject to the NVIDIA CUDA Toolkit EULA (Attachment A; https://docs.nvidia.com/cuda/eula/index.html; the copy that ships with the DLLs is LICENSE-NVIDIA-CUDA-EULA.txt, dated Jan 12, 2024 [read from the zip: LICENSE-NVIDIA-CUDA-EULA.txt header]). Section 1.2(5) of that EULA forbids subjecting the SDK to an open source license, which is why the DLLs are kept out of the MIT-licensed package. If the zip contents change, this notice and README-cuda.txt must be updated.
+LICENSE'taki MIT lisansı, ayrı zip'te dağıtılan NVIDIA CUDA çalışma zamanı DLL'lerini (cudart64_12, cublas64_12, cublasLt64_12) ve sd-cli.exe yanına konan, NVIDIA'nın sağladığı diğer her dosyayı KAPSAMAZ; bunlar NVIDIA CUDA Toolkit EULA'ya tabidir (Attachment A; https://docs.nvidia.com/cuda/eula/index.html; DLL'lerle gelen kopya LICENSE-NVIDIA-CUDA-EULA.txt, tarih 12 Ocak 2024 [okudum zip: LICENSE-NVIDIA-CUDA-EULA.txt başlığı]). EULA 1.2(5) SDK'nın açık kaynak lisansa tabi kılınmasını yasaklar; DLL'ler bu yüzden MIT'li paketin dışında tutulur. Zip içeriği değişirse bu not ve README-cuda.txt güncellenir.

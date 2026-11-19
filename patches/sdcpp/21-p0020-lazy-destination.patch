@@ -1,0 +1,60 @@
+From 47d1804d6c3610bef1a9c7aeb6fa38d7be72eb37 Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Thu, 19 Nov 2026 17:21:35 +0300
+Subject: [PATCH] 0020: MLP_SET_OUT / BLOCK_TAIL_FUSE destination created by
+ pad of first chunk (not a graph-start leaf)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/model/diffusion/minimax_h3.hpp | 20 ++++++++++++++------
+ 1 file changed, 14 insertions(+), 6 deletions(-)
+
+diff --git a/src/model/diffusion/minimax_h3.hpp b/src/model/diffusion/minimax_h3.hpp
+index 8623277..2c64028 100644
+--- a/src/model/diffusion/minimax_h3.hpp
++++ b/src/model/diffusion/minimax_h3.hpp
+@@ -343,10 +343,14 @@ namespace MiniMaxH3 {
+                 auto out = forward_chunk(input);
+                 if (set_ok && out->type == GGML_TYPE_F32 && out->ne[2] == 1 && out->ne[3] == 1 && ggml_is_contiguous(out)) {
+                     if (packed_out == nullptr) {
+-                        packed_out = ggml_new_tensor_4d(ctx->ggml_ctx, GGML_TYPE_F32, out->ne[0], x->ne[1], 1, 1);
++                        // The destination is created by an op (pad of the first chunk, a pure copy plus zero fill) and not as a
++                        // data-less leaf: leaves are allocated at graph start and would stay alive through the attention peak.
++                        GGML_ASSERT(start == 0);
++                        packed_out = ggml_pad(ctx->ggml_ctx, out, 0, static_cast<int>(x->ne[1] - out->ne[1]), 0, 0);
++                    } else {
++                        packed_out = ggml_set_inplace(ctx->ggml_ctx, packed_out, out, packed_out->nb[1], packed_out->nb[2], packed_out->nb[3],
++                                                      static_cast<size_t>(start) * packed_out->nb[1]);
+                     }
+-                    packed_out = ggml_set_inplace(ctx->ggml_ctx, packed_out, out, packed_out->nb[1], packed_out->nb[2], packed_out->nb[3],
+-                                                  static_cast<size_t>(start) * packed_out->nb[1]);
+                     ctx->expand_graph(packed_out);
+                 } else {
+                     GGML_ASSERT(packed_out == nullptr && "SD_MLP_SET_OUT: mixed chunk layout");
+@@ -804,7 +808,7 @@ namespace MiniMaxH3 {
+                     }
+                 }
+                 if (can_fuse) {
+-                    ggml_tensor* packed = ggml_new_tensor_2d(ctx->ggml_ctx, GGML_TYPE_F32, config.hidden_size, total_rows);
++                    ggml_tensor* packed = nullptr;  // created by padding the first chunk (an op), not as a graph-start leaf
+                     int64_t offset      = 0;
+                     for (size_t i = 0; i < segments.size(); ++i) {
+                         const auto& segment = segments[i];
+@@ -818,8 +822,12 @@ namespace MiniMaxH3 {
+                                                           ggml_mul(ctx->ggml_ctx, projection, rows[i][2]));
+                             auto h             = modulate(norm2->forward(ctx, residual), rows[i], 3, 4);
+                             h                  = ggml_add(ctx->ggml_ctx, residual, ggml_mul(ctx->ggml_ctx, mlp->forward(ctx, h), rows[i][5]));
+-                            packed             = ggml_set_inplace(ctx->ggml_ctx, packed, h, packed->nb[1], packed->nb[2], packed->nb[3],
+-                                                                  static_cast<size_t>(offset + start) * packed->nb[1]);
++                            if (packed == nullptr) {
++                                packed = ggml_pad(ctx->ggml_ctx, h, 0, static_cast<int>(total_rows - h->ne[1]), 0, 0);
++                            } else {
++                                packed = ggml_set_inplace(ctx->ggml_ctx, packed, h, packed->nb[1], packed->nb[2], packed->nb[3],
++                                                          static_cast<size_t>(offset + start) * packed->nb[1]);
++                            }
+                             ctx->expand_graph(packed);
+                         }
+                         offset += nrows;
+-- 
+2.51.0.windows.2
+

@@ -1,0 +1,25 @@
+VideoTurko - MODEL LISANS KABULU / MODEL LICENSE ACCEPTANCE
+=============================================================
+(TR)
+VideoTurko yalniz yamalar ve betikler icerir (MIT); modeli ve ciktilari kullanan kisi MiniMax lisansindan kendisi sorumludur. Hukuki gorus degildir.
+Kurulum MiniMax H3 modelini ve HyperFlow-H3-Flash agirliklarini resmi kaynaktan indirir. Bunlar "MiniMax H3 Community License" altindadir:
+https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE
+ - Bolge: Avrupa Birligi, Birlesik Krallik, Guney Kore ve ABD haric (V.4). Model, turevleri VE CIKTILAR (urettiginiz video/ses) bu bolgelerde kullanilamaz, dagitilamaz, gosterilemez.
+ - Ticari: yillik ticari geliriniz 20 milyon USD'yi asarsa MiniMax'tan onceden yazili izin gerekir (IV.1); ticari urunde arayuzde "MiniMax H3" yazilmalidir (IV.2).
+ - Askeri amac yasaktir (Ek A-19). Herkese acik yayinda makine uretimi etiketi zorunludur (Ek A-12).
+ - Ciktiyla baska yapay zeka modeli egitmek yasaktir (V.3).
+ - Butun maddeler: docs/LISANS_UYARISI.md
+Devam etmek icin bunlari okudugunuzu ve kabul ettiginizi onaylayin.
+
+(EN)
+VideoTurko contains only patches and scripts (MIT); whoever uses the model and its outputs is responsible for the MiniMax license themselves. Not legal advice.
+Setup downloads the MiniMax H3 model and HyperFlow-H3-Flash weights from the official source. They are under the "MiniMax H3 Community License":
+https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE
+ - Territory: excludes the European Union, the United Kingdom, South Korea and the United States (V.4). The model, derivatives AND OUTPUTS (generated video/audio) must not be used, distributed or displayed there.
+ - Commercial: above USD 20 million yearly commercial revenue you need prior written authorization from MiniMax (IV.1); commercial products must display "MiniMax H3" in the UI (IV.2).
+ - Military purposes are prohibited (Exhibit A-19). Public posts need a machine-generated label (Exhibit A-12).
+ - No training other AI models on outputs (V.3).
+ - All clauses: docs/LISANS_UYARISI.md
+To continue, confirm that you have read and accept these terms.
+
+Onay / Confirm:  TR: "kabul ediyorum" (E)   EN: "I accept" (Y)

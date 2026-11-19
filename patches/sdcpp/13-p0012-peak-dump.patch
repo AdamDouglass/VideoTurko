@@ -1,0 +1,103 @@
+From 7cbcf8a2cca94e196c934bebdae8c0f3981017ab Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Thu, 19 Nov 2026 09:57:39 +0300
+Subject: [PATCH 15/23] 0012: SD_PEAK_DUMP offline liveness estimate per
+ segment graph (default off)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/core/execution_engine.cpp | 63 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 63 insertions(+)
+
+diff --git a/src/core/execution_engine.cpp b/src/core/execution_engine.cpp
+index f887488..cc8960e 100644
+--- a/src/core/execution_engine.cpp
++++ b/src/core/execution_engine.cpp
+@@ -6,7 +6,9 @@
+ #include <cstdlib>
+ #include <exception>
+ #include <thread>
++#include <unordered_map>
+ #include <unordered_set>
++#include <vector>
+ 
+ #include "core/ggml_extend_backend.h"
+ #include "core/ggml_tensor_utils.h"
+@@ -529,6 +531,66 @@ namespace sd {
+         return true;
+     }
+ 
++    // SD_PEAK_DUMP=<N> (default off, patch 0012): for the first N segment graphs print an offline liveness estimate of the unallocated
++    // intermediates (no in-place reuse, no alignment): peak MB, node where it happens, and the largest live tensors at the peak.
++    static void sd_peak_dump(ggml_cgraph* g, const char* label) {
++        static const int limit = [] {
++            const char* e = std::getenv("SD_PEAK_DUMP");
++            return e != nullptr ? std::atoi(e) : 0;
++        }();
++        static int printed = 0;
++        if (limit <= 0 || printed >= limit || g == nullptr) {
++            return;
++        }
++        ++printed;
++        const int n = ggml_graph_n_nodes(g);
++        auto base_of = [](const ggml_tensor* t) { return t->view_src != nullptr ? t->view_src : t; };
++        auto counted = [](const ggml_tensor* t) { return t->buffer == nullptr && t->view_src == nullptr && t->op != GGML_OP_NONE; };
++        std::unordered_map<const ggml_tensor*, int> last;
++        for (int i = 0; i < n; ++i) {
++            const ggml_tensor* node = ggml_graph_node(g, i);
++            last[base_of(node)] = std::max(last.count(base_of(node)) ? last[base_of(node)] : 0, i);
++            for (int k = 0; k < GGML_MAX_SRC; ++k) {
++                if (node->src[k] != nullptr) {
++                    const ggml_tensor* b = base_of(node->src[k]);
++                    last[b] = std::max(last.count(b) ? last[b] : 0, i);
++                }
++            }
++        }
++        double cur = 0, peak = 0;
++        int peak_i = 0;
++        std::vector<std::vector<const ggml_tensor*>> frees(n);
++        for (int i = 0; i < n; ++i) {
++            const ggml_tensor* node = ggml_graph_node(g, i);
++            if (counted(node)) {
++                cur += ggml_nbytes(node);
++                frees[std::min(last[node], n - 1)].push_back(node);
++            }
++            if (cur > peak) {
++                peak   = cur;
++                peak_i = i;
++            }
++            for (const ggml_tensor* t : frees[i]) {
++                cur -= ggml_nbytes(t);
++            }
++        }
++        std::vector<const ggml_tensor*> live;
++        for (int i = 0; i <= peak_i; ++i) {
++            const ggml_tensor* node = ggml_graph_node(g, i);
++            if (counted(node) && last[node] >= peak_i) {
++                live.push_back(node);
++            }
++        }
++        std::sort(live.begin(), live.end(), [](const ggml_tensor* a, const ggml_tensor* b) { return ggml_nbytes(a) > ggml_nbytes(b); });
++        LOG_WARN("PEAKDUMP %s: est peak %.1f MB at node %d/%d (%s %s), %zu live", label, peak / 1048576.0, peak_i, n,
++                 ggml_op_name(ggml_graph_node(g, peak_i)->op), ggml_get_name(ggml_graph_node(g, peak_i)), live.size());
++        for (size_t i = 0; i < live.size() && i < 14; ++i) {
++            const ggml_tensor* t = live[i];
++            LOG_WARN("PEAKDUMP   %.1f MB %s %s [%lld,%lld,%lld,%lld] %s", ggml_nbytes(t) / 1048576.0, ggml_op_name(t->op), ggml_get_name(t),
++                     (long long)t->ne[0], (long long)t->ne[1], (long long)t->ne[2], (long long)t->ne[3], ggml_type_name(t->type));
++        }
++    }
++
+     bool GraphExecution::execute_graph(ggml_cgraph* graph, int n_threads, bool no_return, const std::function<bool()>& read_outputs) {
+         if (!assign_graph_cut_layer_split_backends(graph)) {
+             return false;
+@@ -643,6 +705,7 @@ namespace sd {
+                 }
+             }
+             auto measurement = segmented ? measure(segment_graph, &cache_outputs) : full_measurement;
++            sd_peak_dump(segment_graph, segment.group_name.c_str());
+             if (!session_.workspace_.prepare(measurement)) {
+                 last_compute_status_ = GGML_STATUS_ALLOC_FAILED;
+                 return fail_segment("workspace preparation");
+-- 
+2.51.0.windows.2
+

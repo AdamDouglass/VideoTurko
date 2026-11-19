@@ -1,0 +1,36 @@
+From 8420c4fc21f2b07c076daff0390d11e6b83b2cbd Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Thu, 19 Nov 2026 00:03:30 +0300
+Subject: [PATCH 12/23] 0009: SD_H3_EMBED_CUT graph cut after input embedding
+ (default off)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/model/diffusion/minimax_h3.hpp | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/src/model/diffusion/minimax_h3.hpp b/src/model/diffusion/minimax_h3.hpp
+index ea0ca6c..a4939f9 100644
+--- a/src/model/diffusion/minimax_h3.hpp
++++ b/src/model/diffusion/minimax_h3.hpp
+@@ -982,6 +982,17 @@ namespace MiniMaxH3 {
+                                         curve_upper_indices,
+                                         curve_fractions);
+             auto pe    = build_rope(ctx, position_ids);
++            // SD_H3_EMBED_CUT=1 (default off): own graph cut after the input embedding/concat, so blocks.0 reads its input from the
++            // cut cache like every other block (first-block compute buffer no longer holds the embedding prologue). Same arithmetic.
++            {
++                static const bool embed_cut = [] {
++                    const char* e = std::getenv("SD_H3_EMBED_CUT");
++                    return e != nullptr && e[0] != '\0' && e[0] != '0';
++                }();
++                if (embed_cut) {
++                    sd::ggml_graph_cut::mark_graph_cut(h, "minimax_h3.embed", "hidden_states");
++                }
++            }
+             for (int64_t i = 0; i < config.num_layers; ++i) {
+                 auto block = std::dynamic_pointer_cast<TransformerBlock>(blocks["blocks." + std::to_string(i)]);
+                 h          = block->forward(ctx, h, t_emb, segments, pe);
+-- 
+2.51.0.windows.2
+

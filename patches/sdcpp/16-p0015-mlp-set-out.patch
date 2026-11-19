@@ -1,0 +1,56 @@
+From 91febc2cbdd06f7290cd3d12713721f89ca9ff2a Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Thu, 19 Nov 2026 12:27:41 +0300
+Subject: [PATCH] 0015: SD_MLP_SET_OUT (MLP chunk outputs via set_inplace,
+ default off)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/model/diffusion/minimax_h3.hpp | 25 ++++++++++++++++++++++++-
+ 1 file changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/src/model/diffusion/minimax_h3.hpp b/src/model/diffusion/minimax_h3.hpp
+index e2653b4..1c8d731 100644
+--- a/src/model/diffusion/minimax_h3.hpp
++++ b/src/model/diffusion/minimax_h3.hpp
+@@ -300,13 +300,36 @@ namespace MiniMaxH3 {
+                 return forward_chunk(x);
+             }
+ 
++            // SD_MLP_SET_OUT=1 (default off): write each chunk's fc2 output into one preallocated tensor (pure f32 copy,
++            // no arithmetic) instead of a concat tree that keeps the chunks plus the concatenated copies alive.
++            static const bool mlp_set_out = [] {
++                const char* e = std::getenv("SD_MLP_SET_OUT");
++                return e != nullptr && e[0] == '1';
++            }();
+             std::vector<ggml_tensor*> chunks;
++            ggml_tensor* packed_out = nullptr;
++            bool set_ok             = mlp_set_out && x->ne[2] == 1 && x->ne[3] == 1;
+             for (int64_t start = 0; start < x->ne[1]; start += chunk_size) {
+                 auto input = ggml_ext_slice(ctx, x, 1, start, std::min(start + chunk_size, x->ne[1]), false);
+                 if (!ggml_is_contiguous(input)) {
+                     input = ggml_cont(ctx->ggml_ctx, input);
+                 }
+-                chunks.push_back(forward_chunk(input));
++                auto out = forward_chunk(input);
++                if (set_ok && out->type == GGML_TYPE_F32 && out->ne[2] == 1 && out->ne[3] == 1 && ggml_is_contiguous(out)) {
++                    if (packed_out == nullptr) {
++                        packed_out = ggml_new_tensor_4d(ctx->ggml_ctx, GGML_TYPE_F32, out->ne[0], x->ne[1], 1, 1);
++                    }
++                    packed_out = ggml_set_inplace(ctx->ggml_ctx, packed_out, out, packed_out->nb[1], packed_out->nb[2], packed_out->nb[3],
++                                                  static_cast<size_t>(start) * packed_out->nb[1]);
++                    ctx->expand_graph(packed_out);
++                } else {
++                    GGML_ASSERT(packed_out == nullptr && "SD_MLP_SET_OUT: mixed chunk layout");
++                    set_ok = false;
++                    chunks.push_back(out);
++                }
++            }
++            if (packed_out != nullptr && chunks.empty()) {
++                return packed_out;
+             }
+             return ggml_ext_vec_concat(ctx, chunks, 1);
+         }
+-- 
+2.51.0.windows.2
+

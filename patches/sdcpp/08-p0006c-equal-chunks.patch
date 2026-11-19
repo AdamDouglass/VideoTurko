@@ -1,0 +1,46 @@
+From c1a185545bc380819307c0d7d81b65ed19e10a03 Mon Sep 17 00:00:00 2001
+From: VideoTurko <noreply@example.invalid>
+Date: Wed, 18 Nov 2026 22:46:05 +0300
+Subject: [PATCH 10/23] 0006c: esit parca boyu (env acikken), cstdlib
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/model/diffusion/minimax_h3.hpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/model/diffusion/minimax_h3.hpp b/src/model/diffusion/minimax_h3.hpp
+index 71216b3..ea0ca6c 100644
+--- a/src/model/diffusion/minimax_h3.hpp
++++ b/src/model/diffusion/minimax_h3.hpp
+@@ -6,6 +6,7 @@
+ #include <cinttypes>
+ #include <cmath>
+ #include <cstddef>
++#include <cstdlib>
+ #include <functional>
+ #include <set>
+ #include <string>
+@@ -290,6 +291,10 @@ namespace MiniMaxH3 {
+                 // Matmul outputs are F32 even for quantized weights.
+                 size_t token_bytes = ggml_row_size(GGML_TYPE_F32, std::max(x->ne[0], 2 * ffn_hidden_size)) * x->ne[2] * x->ne[3];
+                 chunk_size         = static_cast<int64_t>(std::min<size_t>(chunk_size, std::max<size_t>(1, chunk_budget / token_bytes)));
++                // Env cap only: equal-sized chunks, so no tiny tail chunk (tiny batches may pick another matmul kernel).
++                if (chunk_size < x->ne[1] && std::getenv("SD_MLP_CHUNK_MB") != nullptr) {
++                    chunk_size = (x->ne[1] + (x->ne[1] + chunk_size - 1) / chunk_size - 1) / ((x->ne[1] + chunk_size - 1) / chunk_size);
++                }
+             }
+             if (chunk_size == x->ne[1]) {
+                 return forward_chunk(x);
+@@ -387,6 +392,9 @@ namespace MiniMaxH3 {
+                 }
+                 size_t token_bytes = ggml_row_size(GGML_TYPE_F32, 3 * heads * head_dim) * inputs[0]->ne[2] * inputs[0]->ne[3];
+                 chunk_size         = static_cast<int64_t>(std::min<size_t>(chunk_size, std::max<size_t>(1, chunk_budget / token_bytes)));
++                if (chunk_size < sequence && std::getenv("SD_QKV_CHUNK_MB") != nullptr) {
++                    chunk_size = (sequence + (sequence + chunk_size - 1) / chunk_size - 1) / ((sequence + chunk_size - 1) / chunk_size);
++                }
+             }
+             if (chunk_size == sequence) {
+                 ggml_tensor* projected = nullptr;
+-- 
+2.51.0.windows.2
+

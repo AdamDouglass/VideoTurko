@@ -1,0 +1,27 @@
+# Apply order. Bases: stable-diffusion.cpp 32d516c (master-1088); ggml d803c238 (its submodule pin).
+# ggml (inside the ggml submodule), in this order:
+ggml/01-ggml-taban.patch
+ggml/02-p0005-optime-file.patch
+ggml/03-p0005-optime-fix.patch
+# stable-diffusion.cpp, in this order (git am):
+sdcpp/01-taban-hiz-yamalari.patch
+sdcpp/02-p0001-video-latent-save-load.patch
+sdcpp/03-p0002-pr2369-h3-vae-encode.patch
+sdcpp/04-p0003-model-loader-sleep.patch
+sdcpp/05-p0004-prefetch-mmap.patch
+sdcpp/06-p0006-mlp-chunk.patch
+sdcpp/07-p0006b-qkv-chunk.patch
+sdcpp/08-p0006c-equal-chunks.patch
+sdcpp/09-p0007-cut-cache-host.patch
+sdcpp/10-p0009-embed-cut.patch
+sdcpp/11-p0010-drop-queued.patch
+sdcpp/12-p0011-evict-past.patch
+sdcpp/13-p0012-peak-dump.patch
+sdcpp/14-p0013-attn-set-out.patch
+sdcpp/15-p0014-qkv-set-out.patch
+sdcpp/16-p0015-mlp-set-out.patch
+sdcpp/17-p0016-vae-no-tiling-fallback.patch
+sdcpp/18-p0017-cutcache-host-estimate.patch
+sdcpp/19-p0018-vae-embed-cut.patch
+sdcpp/20-p0019-block-tail-fuse.patch
+sdcpp/21-p0020-lazy-destination.patch
