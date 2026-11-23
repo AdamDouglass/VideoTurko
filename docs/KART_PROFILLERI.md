@@ -30,3 +30,7 @@ Open question / Açık soru: does the release `sm_61` engine work on RTX 50 with
 | RTX 50xx with the stock engine | stock CUDA, `f32` | [read] the stock build lists `sm_120`; no stock run on an RTX 50 card. The release `sm_61` engine gave a black video there and a local `sm_120` build worked (PR #3). / [okudum] stock derleme `sm_120` listeler; RTX 50'de stock koşu yok. Hazır `sm_61` motor orada siyah video verdi, yerel `sm_120` derleme çalıştı (PR #3). |
 | Other AMD Radeon cards | stock Vulkan, `minimax_h3_attn_chunk_budget=0.03` | [guess] the RX 9070 XT row is the only AMD report; other models and the ROCm path (needs `hipblas.dll`, not automatic) are not covered. / [tahmin] RX 9070 XT satırı tek AMD bildirimi; diğer modeller ve ROCm yolu (`hipblas.dll` ister, otomatik değil) kapsam dışı. |
 | Intel Arc and anything else | none automatic | [read] `kur.ps1` stops with an error; `-MotorTuru` by hand is possible but nobody has reported a run. / [okudum] `kur.ps1` hata verir; `-MotorTuru` ile elle denenebilir ama bildirilen koşu yok. |
+
+## Community experiments / Topluluk deneyleri
+
+[RTX 3060 Ti 8 GB on Linux](RTX3060TI_LINUX_5S.md) reports a custom four-step image-to-video profile and exact 5-second 1080p export.
