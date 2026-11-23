@@ -45,9 +45,12 @@ function DosyaHash([string]$p) {
             return (-join ($bytes | ForEach-Object { $_.ToString('x2') })).ToUpper().Substring(0, 16)
         } finally {
             $fs.Dispose()
+            $sha.Dispose()
         }
     } catch {
-        return ''
+        # Hash alinamazsa imza hicbir zaman eslesmesin: plan atlanmaz, yeniden uretilir (bos imza eski sonucu yanlislikla gecerli sayabilirdi).
+        # If the hash cannot be read, return a value that never matches, so the plan is re-run instead of skipped.
+        return ('HASHYOK-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     }
 }
 
