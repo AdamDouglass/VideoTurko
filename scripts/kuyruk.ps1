@@ -33,6 +33,24 @@ function Bul-Kare([string]$Dizin, [string]$Ad) {
     return $null
 }
 
+function DosyaHash([string]$p) {
+    if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
+        return (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.Substring(0, 16)
+    }
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $fs = [System.IO.File]::OpenRead($p)
+        try {
+            $bytes = $sha.ComputeHash($fs)
+            return (-join ($bytes | ForEach-Object { $_.ToString('x2') })).ToUpper().Substring(0, 16)
+        } finally {
+            $fs.Dispose()
+        }
+    } catch {
+        return ''
+    }
+}
+
 $sirala = { [regex]::Replace($_.Name, '\d+', { param($m) $m.Value.PadLeft(8, '0') }) }
 $planlar = @(Get-ChildItem -LiteralPath $Klasor -Directory | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'istem.txt') } | Sort-Object $sirala)
 if ($planlar.Count -eq 0) { Write-Output 'HATA: istem.txt iceren plan klasoru yok'; exit 3 }
@@ -42,8 +60,8 @@ foreach ($p in $planlar) {
     $d = $p.FullName
     $sonucDosya = Join-Path $d 'kuyruk_sonuc.txt'
     $video = Join-Path $d 'video.avi'
-    $imza = "kare=$Kare w=$W h=$H istem=" + (Get-FileHash -LiteralPath (Join-Path $d 'istem.txt') -Algorithm SHA256).Hash.Substring(0, 16)
-    foreach ($g in @((Bul-Kare $d 'ilk'), (Bul-Kare $d 'son'))) { if ($g) { $imza += ' ' + (Split-Path -Leaf $g) + '=' + (Get-FileHash -LiteralPath $g -Algorithm SHA256).Hash.Substring(0, 16) } }
+    $imza = "kare=$Kare w=$W h=$H istem=" + (DosyaHash (Join-Path $d 'istem.txt'))
+    foreach ($g in @((Bul-Kare $d 'ilk'), (Bul-Kare $d 'son'))) { if ($g) { $imza += ' ' + (Split-Path -Leaf $g) + '=' + (DosyaHash $g) } }
     if (-not $Kuru -and (Test-Path -LiteralPath $sonucDosya) -and (Test-Path -LiteralPath $video)) {
         $eskiSatir = @(Get-Content -LiteralPath $sonucDosya -TotalCount 2)
         $eski = $eskiSatir[0]
