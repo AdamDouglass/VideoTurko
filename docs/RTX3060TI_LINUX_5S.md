@@ -1,6 +1,6 @@
 # RTX 3060 Ti 8 GB on Linux with a 5-second 1080p output
 
-Community measurements from one Linux rig, taken on 2026-11-22. This run used a custom CUDA build and an experimental four-step profile. The results apply to that profile. The VideoTurko Windows installer, 56-frame byte comparison and VideoTurko quality gate were outside this test.
+Community measurements from one Linux rig, taken on 2026-11-22. This run used a custom CUDA build and an experimental four-step profile. The results apply to that profile. [user-reported, PR #13]: the [read] and [measured] labels below are the contributor's own; the maintainers did not repeat these runs. This is not a supported VideoTurko profile; the default stays the fixed six-step profile. The VideoTurko Windows installer, 56-frame byte comparison and VideoTurko quality gate were outside this test.
 
 ## Setup
 

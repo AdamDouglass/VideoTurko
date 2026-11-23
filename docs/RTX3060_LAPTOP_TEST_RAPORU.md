@@ -1,5 +1,7 @@
 # RTX 3060 Laptop 6 GB test raporu (TR)
 
+> EN summary [user-reported, PR #14]: contributor's runs on an RTX 3060 Laptop 6 GB (stock CUDA 12 engine). 158 frames text-to-video passed the quality gate (peak 5122/6144 MiB); 175 frames stopped (`VT-E-TILING`); a 141-frame `-InitImg` run got gate RED on a painterly clip. Three setup frictions are listed below: the quality gate does not look in `.venv`, a model download timeout, and a fixed 32 GiB disk threshold when resuming. The [ölçtüm] labels below are the contributor's own measurements.
+
 > Katkıcı ölçümü [kullanıcı bildirdi]. Koşuları Claude Code (yapay zekâ kod ajanı) katkıcının bilgisayarında çalıştırdı; katkıcı izledi ve çıktıları kontrol etti. Model lisansını (`docs/LISANS_KABUL.txt`) katkıcı kendisi kabul etti.
 
 **Tarih:** 2026-11-23
