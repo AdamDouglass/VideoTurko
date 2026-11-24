@@ -1,8 +1,8 @@
 # RTX A4000 16 GB on Linux: test report / test raporu
 
-> EN summary [user-reported]: 19 runs through `./uret.sh` on one RTX A4000 16 GB (Ubuntu Server 24.04, engine built with `scripts/derle_linux.sh`): text-to-video from 56 to 209 frames, first-frame and first+last-frame at 192 frames, one process at 209 frames, a vertical size, three larger sizes and three other prompts. All 19 clips passed the quality gate. Quality settings were not changed. The card ran at 94 C with software thermal slowdown, so the times are those of a throttled card.
+> EN summary [user-reported, PR #18; maintainers did not repeat the runs]: 19 runs through `./uret.sh` on one RTX A4000 16 GB (Ubuntu Server 24.04, engine built with `scripts/derle_linux.sh`): text-to-video from 56 to 209 frames, first-frame and first+last-frame at 192 frames, one process at 209 frames, a vertical size, three larger sizes and three other prompts. All 19 clips passed the quality gate. Quality settings were not changed. The card ran at 94 C with software thermal slowdown, so the times are those of a throttled card.
 >
-> TR özet [kullanıcı bildirdi]: tek bir RTX A4000 16 GB'ta (Ubuntu Server 24.04, motor `scripts/derle_linux.sh` ile derlendi) `./uret.sh` ile 19 koşu: 56-209 kare metinden video, 192 karede ilk kare ve ilk+son kare, 209 karede tek süreç, dikey boyut, üç büyük boyut ve üç başka istem. 19 klibin hepsi kalite kapısından geçti. Kalite ayarları değişmedi. Kart 94 C'de yazılımsal ısı kısmasıyla çalıştı; süreler kısılmış kartın süreleridir.
+> TR özet [kullanıcı bildirdi, PR #18; bakımcılar tekrar etmedi]: tek bir RTX A4000 16 GB'ta (Ubuntu Server 24.04, motor `scripts/derle_linux.sh` ile derlendi) `./uret.sh` ile 19 koşu: 56-209 kare metinden video, 192 karede ilk kare ve ilk+son kare, 209 karede tek süreç, dikey boyut, üç büyük boyut ve üç başka istem. 19 klibin hepsi kalite kapısından geçti. Kalite ayarları değişmedi. Kart 94 C'de yazılımsal ısı kısmasıyla çalıştı; süreler kısılmış kartın süreleridir.
 
 The labels below are the contributor's own. Claude Code (an AI coding agent) ran the tests on the contributor's server. The contributor watched the clips.
 
@@ -20,16 +20,16 @@ Model license (`docs/LISANS_KABUL.txt`): the contributor's own decision, given b
 | OS | Ubuntu Server 24.04.5, kernel 6.8.0-149 |
 | Engine | stable-diffusion.cpp `32d516c` with the repo patches, built for `sm_86` by `scripts/derle_linux.sh` |
 
-`nvidia-smi` name, total memory, driver, compute capability [measured]: `NVIDIA RTX A4000, 16376, 595.91.07, 8.6`.
+`nvidia-smi` name, total memory, driver, compute capability [user-reported]: `NVIDIA RTX A4000, 16376, 595.91.07, 8.6`.
 
 ## Install
 
-- `./kur.sh --kuru`: exit 0, no error line [measured].
-- `--kuru` returned 0 although `cmake`, `nvcc` and Python `ensurepip` were all missing: it does not check the build tools [measured].
-- The tools were put under the root, with no system package and no sudo: CUDA 12.8 (`nvcc` 12.8.93), g++ 13.4 and cmake 4.5.1 from conda-forge in `engine/toolchain/env` (`derle_linux.sh` looks there), and `.venv` made with `uv` [measured].
-- Build: `DERLE_OK` in 29 min 48 s including the source clone, 4 jobs [measured]. A large file copy to the same machine was running meanwhile.
-- The four model files were copied from another machine; `./kur.sh --dogrula` reported the right sha256 for all four [measured].
-- 5-frame check: `HAZIR / READY`, exit 0 [measured].
+- `./kur.sh --kuru`: exit 0, no error line [user-reported].
+- `--kuru` returned 0 although `cmake`, `nvcc` and Python `ensurepip` were all missing: it does not check the build tools [user-reported].
+- The tools were put under the root, with no system package and no sudo: CUDA 12.8 (`nvcc` 12.8.93), g++ 13.4 and cmake 4.5.1 from conda-forge in `engine/toolchain/env` (`derle_linux.sh` looks there), and `.venv` made with `uv` [user-reported].
+- Build: `DERLE_OK` in 29 min 48 s including the source clone, 4 jobs [user-reported]. A large file copy to the same machine was running meanwhile.
+- The four model files were copied from another machine; `./kur.sh --dogrula` reported the right sha256 for all four [user-reported].
+- 5-frame check: `HAZIR / READY`, exit 0 [user-reported].
 
 ## Method
 
@@ -39,7 +39,7 @@ Model license (`docs/LISANS_KABUL.txt`): the contributor's own decision, given b
 
 One run per row, seed 42, `f32` cuBLAS set by the script. At 640x384, 56 and 107 frames ran in one process and longer ones in two (the script's own rule), unless stated. Time is the wall time of `uret.sh` including the gate. VRAM is the whole card, `nvidia-smi` every 2 s, so short spikes can be missed. A peak is not a minimum requirement: three other prompts at 209 frames peaked about 1.8 GB lower.
 
-## Text-to-video, 640x384 [measured]
+## Text-to-video, 640x384 [user-reported]
 
 | Frames | Time | VRAM peak | Gate | Noise / flow / N |
 |---|---|---|---|---|
@@ -53,7 +53,7 @@ One run per row, seed 42, `f32` cuBLAS set by the script. At 640x384, 56 and 107
 
 Contributor's viewing: all fine, no black frames.
 
-## One process, image inputs and vertical [measured]
+## One process, image inputs and vertical [user-reported]
 
 | Run | Frames | Time | VRAM peak | Gate | Noise / flow / N | Contributor's viewing |
 |---|---|---|---|---|---|---|
@@ -64,7 +64,7 @@ Contributor's viewing: all fine, no black frames.
 
 The input images are the first and last frame of the 209-frame clip above. The one-process run was faster and used less VRAM than the two-process run at 209 frames; one run each.
 
-## Larger sizes [measured]
+## Larger sizes [user-reported]
 
 The gate is calibrated at 640x384 and reads lower noise at larger sizes, so these passes are weaker evidence; the viewing column matters more here.
 
@@ -78,7 +78,7 @@ The gate is calibrated at 640x384 and reads lower noise at larger sizes, so thes
 
 1024x576 and 1280x704 were not tried above 56 frames [not tried].
 
-## Other prompts, 209 frames, 640x384 [measured]
+## Other prompts, 209 frames, 640x384 [user-reported]
 
 Three of the contributor's own four-slice prompts; only the time slices were rescaled to the clip length.
 
@@ -92,6 +92,6 @@ The first of these runs overlapped with a video re-encode on the same machine, s
 
 ## Notes
 
-- **Temperature** [measured]: 94 C peak in 17 of the 19 runs here (56 frames: 76 C, 107 frames: 92 C). Software thermal slowdown was active in the one detailed reading, with 1380-1470 MHz of 2100 MHz and the fan at 76%. Hardware thermal slowdown stayed at 0 us in every reading. The limits the card reports: 98 C max operating, 100 C slowdown, 103 C shutdown.
-- **Another GPU process** [measured]: the sampler flagged a process other than `sd-cli` in the 192-frame text-to-video run and in the earthworm run. For the 192-frame run it was one sample out of 101, at 183 MiB and 0% load. The name was not recorded; [guess] `sd-cli` starting or ending.
+- **Temperature** [user-reported]: 94 C peak in 17 of the 19 runs here (56 frames: 76 C, 107 frames: 92 C). Software thermal slowdown was active in the one detailed reading, with 1380-1470 MHz of 2100 MHz and the fan at 76%. Hardware thermal slowdown stayed at 0 us in every reading. The limits the card reports: 98 C max operating, 100 C slowdown, 103 C shutdown.
+- **Another GPU process** [user-reported]: the sampler flagged a process other than `sd-cli` in the 192-frame text-to-video run and in the earthworm run. For the 192-frame run it was one sample out of 101, at 183 MiB and 0% load. The name was not recorded; [guess] `sd-cli` starting or ending.
 - **Not done** [not tried]: byte comparison with the reference, repeat runs, other seeds.

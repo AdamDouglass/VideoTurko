@@ -45,7 +45,7 @@
       "ek_ayar": {},
       "durum": "dogrulanmis",
       "dogrulanmis_kartlar": ["GTX 1050 Ti"],
-      "kanit": "[olctum, yazarlar] GTX 1050 Ti 4 GB, docs/OLCUMLER.md. Diger Pascal kartlar ayni mimari ama bakimcilar olcmedi [tahmin].",
+      "kanit": "[olctum, yazarlar] GTX 1050 Ti 4 GB, docs/OLCUMLER.md. Diger Pascal kartlar ayni mimari ama bakimcilar olcmedi [tahmin]; topluluk olcumu [kullanici bildirdi]: GTX 1070 8 GB, release sm_61, 209 kare kapi gecti (PR #17), bakimcilar tekrar etmedi.",
       "belge": "docs/OLCUMLER.md"
     },
     {
@@ -65,7 +65,7 @@
       "motor": "stock_cuda12",
       "ek_ayar": {"env": {"GGML_CUDA_CUBLAS_COMPUTE_TYPE": "f32"}},
       "durum": "topluluk",
-      "kanit": "[kullanici bildirdi, PR #6] RTX 3070 8 GB (8.6): stock motor, 243 kare tek gecis, uret.ps1 disinda; kalite kapisi kosulmadi. Sonra docs/KART_PROFILLERI.md tablosuna eklenen olcumler [kullanici bildirdi]: RTX 3060 12 GB (PR #11), RTX 3060 Laptop 6 GB iki ayri cihaz (PR #14, PR #15), RTX 3070 Ti 8 GB (PR #16); bakimcilar tekrar etmedi.",
+      "kanit": "[kullanici bildirdi, PR #6] RTX 3070 8 GB (8.6): stock motor, 243 kare tek gecis, uret.ps1 disinda; kalite kapisi kosulmadi. Sonra docs/KART_PROFILLERI.md tablosuna eklenen olcumler [kullanici bildirdi]: RTX 3060 12 GB (PR #11), RTX 3060 Laptop 6 GB iki ayri cihaz (PR #14, PR #15), RTX 3070 Ti 8 GB (PR #16), RTX 3050 8 GB (PR #19), RTX A4000 16 GB Linux (PR #18); bakimcilar tekrar etmedi.",
       "belge": "docs/RTX3070_STOCK_SDCPP.md"
     },
     {

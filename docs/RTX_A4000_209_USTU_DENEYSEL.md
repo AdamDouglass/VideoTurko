@@ -1,8 +1,8 @@
 # RTX A4000 above 209 frames: experiment / 209 kare üstü deneme
 
-> EN summary [user-reported]: **not a supported length; 209 stays the recommended maximum.** On the same RTX A4000 16 GB (Linux) as `RTX_A4000_LINUX_TEST_RAPORU.md`, text-to-video at 640x384 ran from 226 to 481 frames with `VT_MAX_KARE` and passed the gate at every length tried; 515 stopped on an engine assertion, not on VRAM. Some clips showed prompt-following flaws that the gate does not detect. No change to the 209 limit is proposed.
+> EN summary [user-reported, PR #18; maintainers did not repeat the runs]: **not a supported length; 209 stays the recommended maximum.** On the same RTX A4000 16 GB (Linux) as `RTX_A4000_LINUX_TEST_RAPORU.md`, text-to-video at 640x384 ran from 226 to 481 frames with `VT_MAX_KARE` and passed the gate at every length tried; 515 stopped on an engine assertion, not on VRAM. Some clips showed prompt-following flaws that the gate does not detect. No change to the 209 limit is proposed.
 >
-> TR özet [kullanıcı bildirdi]: **desteklenen uzunluk değildir; önerilen üst sınır 209 kalır.** `RTX_A4000_LINUX_TEST_RAPORU.md` ile aynı RTX A4000 16 GB'ta (Linux) 640x384 metinden video, `VT_MAX_KARE` ile 226-481 kare arasında denenen her uzunlukta kapıdan geçti; 515 kare VRAM'de değil, motordaki bir assert'te durdu. Bazı kliplerde kapının görmediği, isteme uymama kusurları vardı. 209 sınırını değiştirme önerisi yoktur.
+> TR özet [kullanıcı bildirdi, PR #18; bakımcılar tekrar etmedi]: **desteklenen uzunluk değildir; önerilen üst sınır 209 kalır.** `RTX_A4000_LINUX_TEST_RAPORU.md` ile aynı RTX A4000 16 GB'ta (Linux) 640x384 metinden video, `VT_MAX_KARE` ile 226-481 kare arasında denenen her uzunlukta kapıdan geçti; 515 kare VRAM'de değil, motordaki bir assert'te durdu. Bazı kliplerde kapının görmediği, isteme uymama kusurları vardı. 209 sınırını değiştirme önerisi yoktur.
 
 **Date:** 2026-11-24. **Commit, card, engine and method:** as in `RTX_A4000_LINUX_TEST_RAPORU.md`. Quality settings were not changed. Two processes (the script's default at these lengths), one run per row, seed 42. The card peaked at 93-94 C in every completed run; the times are those of a throttled card.
 
@@ -10,7 +10,7 @@
 VT_MAX_KARE=<N> ./uret.sh --istem docs/ornek_istem_R0.txt --kare <N>
 ```
 
-## Sample prompt [measured]
+## Sample prompt [user-reported]
 
 | Frames | Length | Time | VRAM peak | Gate | Noise / flow / N | Contributor's viewing |
 |---|---|---|---|---|---|---|
@@ -27,7 +27,7 @@ VT_MAX_KARE=<N> ./uret.sh --istem docs/ornek_istem_R0.txt --kare <N>
 
 Lengths between these rows, including 498, were not tried [not tried]. The sampler flagged another GPU process in the 243-frame run; its name was not recorded.
 
-## Other prompts, 345 frames [measured]
+## Other prompts, 345 frames [user-reported]
 
 The same three prompts as in the 209-frame table of the other report, with the time slices rescaled.
 
@@ -43,7 +43,7 @@ The same three prompts as in the 209-frame table of the other report, with the t
 ggml.c:3555: GGML_ASSERT(offset < (size_t)(1 << 30)) failed
 ```
 
-- [measured] `sd-cli` exit 134 (abort) while building the graph, with 179 MiB of VRAM in use; `uret.sh` reports it as `VT-E-LATENT`, exit 1. Not retried.
+- [user-reported] `sd-cli` exit 134 (abort) while building the graph, with 179 MiB of VRAM in use; `uret.sh` reports it as `VT-E-LATENT`, exit 1. Not retried.
 - [read] The backtrace resolves to `ggml_set_inplace` called from `MiniMaxH3::Attention::project_qkv` (`addr2line`). The assertion is in `ggml_set_impl`. `SD_QKV_SET_OUT` (patch 0014) is read in `minimax_h3.hpp`, and `uret.sh` sets it only for two processes.
 - [guess] The preallocated buffer of patch 0014 passes 1 GiB between 481 and 515 frames at this size. Whether one process gets past this point was not tried, so the VRAM limit of the card is unknown.
 
