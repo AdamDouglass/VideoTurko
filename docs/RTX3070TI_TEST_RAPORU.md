@@ -1,8 +1,8 @@
 # RTX 3070 Ti 8 GB Masaustu Test Raporu (TR + EN)
 
-> EN summary [user-reported]: contributor's runs on an NVIDIA GeForce RTX 3070 Ti 8 GB Desktop GPU (stock CUDA 12 engine, sm_86). Runs up to 192 frames in one pass passed the quality gate (peak 7456/8192 MiB); 175 frames peaked at 7699 MiB (margin 493 MiB). All runs produced valid video and audio, passed the quality gate (`KAPI GECTI`), and ran via `uret.ps1`. The [ölçtüm] labels below are the contributor's own measurements.
+> EN summary [user-reported, PR #16]: contributor's runs on an NVIDIA GeForce RTX 3070 Ti 8 GB Desktop GPU (stock CUDA 12 engine, sm_86). Runs up to 192 frames in one pass passed the quality gate (peak 7456/8192 MiB); 175 frames peaked at 7699 MiB (margin 493 MiB). All runs produced valid video and audio, passed the quality gate (`KAPI GECTI`), and ran via `uret.ps1`. The [kullanıcı bildirdi] labels below are the contributor's own measurements.
 
-> Katkıcı ölçümü [kullanıcı bildirdi]. Model lisansı (`docs/LISANS_KABUL.txt`) kabul edilmiştir.
+> Katkıcı ölçümü [kullanıcı bildirdi, PR #16]; bakımcılar bu kartta tekrar etmedi. Model lisansı (`docs/LISANS_KABUL.txt`) katkıcının kurulumunda kabul edildi [kullanıcı bildirdi].
 
 **Tarih:** 2026-11-23  
 **Motor:** `kur.ps1`'in bu kart sınıfı için seçtiği stock motor (`stable-diffusion.cpp` `master-1106-532d2c1`, `win-cuda12-x64`, yama yok), `uret.ps1` üzerinden.
@@ -19,7 +19,7 @@
 
 ## Kurulum ve Kontrol
 
-`kur.ps1 -Kuru`: 0 HATA, 1 UYARI (`VT-W-GPU-DENENMEDI`) [ölçtüm]. Motor seçimi `stock_cuda12` (ampere, topluluk).
+`kur.ps1 -Kuru`: 0 HATA, 1 UYARI (`VT-W-GPU-DENENMEDI`) [kullanıcı bildirdi]. Motor seçimi `stock_cuda12` (ampere, topluluk).
 
 Kalite kapısı için Python ortamı (`opencv-python`, `numpy`) hazırdır.
 
@@ -37,7 +37,7 @@ Komut standardı:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\uret.ps1 -Istem <ISTEM> -Kare <N> -Cikti <OUT>\video.avi
 ```
 
-VRAM: `uret.ps1`'in `nvidia-smi` tepe değeri (tüm kart, 5 sn örnek; masaüstü ekran yükü başlangıçta ~1,2–1,8 GB kullanmaktadır). Süre: `uret.ps1` duvar saati süresidir [ölçtüm].
+VRAM: `uret.ps1`'in `nvidia-smi` tepe değeri (tüm kart, 5 sn örnek; masaüstü ekran yükü başlangıçta ~1,2–1,8 GB kullanmaktadır). Süre: `uret.ps1` duvar saati süresidir [kullanıcı bildirdi].
 
 | Koşu Türü | Kare | Süre (uret.ps1) | VRAM Tepe | Boş Marj | Kalite Kapısı Sonucu |
 |---|---|---|---|---|---|
@@ -50,11 +50,11 @@ VRAM: `uret.ps1`'in `nvidia-smi` tepe değeri (tüm kart, 5 sn örnek; masaüst�
 
 ## Gözlemler ve Notlar
 
-- **192 kareye kadar tam destek:** 8 GB VRAM'e sahip RTX 3070 Ti masaüstü kartında hem salt metinden video hem de `-InitImg` referanslı görselden video üretiminde 192 kareye kadar (8.0 saniye) tek aşamada sorunsuz ulaşılmıştır [ölçtüm].
-- **Güvenli VRAM Marjı:** En yüksek VRAM tepe noktası 175 kare metin üretiminde 7699 MiB olarak ölçülmüş olup, tüm koşularda en az 493–944 MiB boş marj korunmuştur. Hiçbir koşuda bellek taşması (`VT-E-VRAM`) veya karolu VAE'ye düşme (`VT-E-TILING`) yaşanmamıştır [ölçtüm].
+- **192 kareye kadar tam destek:** 8 GB VRAM'e sahip RTX 3070 Ti masaüstü kartında hem salt metinden video hem de `-InitImg` referanslı görselden video üretiminde 192 kareye kadar (8.0 saniye) tek aşamada sorunsuz ulaşılmıştır [kullanıcı bildirdi].
+- **Güvenli VRAM Marjı:** En yüksek VRAM tepe noktası 175 kare metin üretiminde 7699 MiB olarak ölçülmüş olup, tüm koşularda en az 493–944 MiB boş marj korunmuştur. Hiçbir koşuda bellek taşması (`VT-E-VRAM`) veya karolu VAE'ye düşme (`VT-E-TILING`) yaşanmamıştır [kullanıcı bildirdi].
 - **Masaüstü Yükü Toleransı:** Masaüstü ortamının ekran kartı üzerinde başlangıçta ~1,2–1,8 GB bellek kullanmasına rağmen 192 kareye kadar olan üretimler başarıyla tamamlanmıştır.
-- **Kalite Kapısı:** Tüm çıktılarda ses akışı (`pcm_s16le`) doğrulanmış, ham gürültü ($N \le 1.5$) ve orta akış ($F > 0.05$) kabul bantlarında kalarak kapıdan başarıyla geçmiştir (`KAPI GECTI`).
+- **Kalite Kapısı:** Tüm çıktılarda ses akışı (`pcm_s16le`) doğrulanmış, ham gürültü (<= 1,5) ve orta akış (> 0,05) kabul bantlarında kalarak kapıdan başarıyla geçmiştir (`KAPI GECTI`).
 
 ## Kontroller
 
-`python -I -X utf8 scripts/denetim.py --hizli` çıktısı: `SONUC: GECTI`
+Bkz. PR #16 açıklaması. Kapıları bakımcılar birleştirmeden önce kendi kopyalarında çalıştırdı.
