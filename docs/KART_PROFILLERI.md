@@ -40,3 +40,7 @@ Open question / Açık soru: does the release `sm_61` engine work on RTX 50 with
 [RTX 3060 Ti 8 GB on Linux](RTX3060TI_LINUX_5S.md) reports a custom four-step image-to-video profile and exact 5-second 1080p export. [user-reported, PR #13] This is not a supported VideoTurko profile; the default stays the fixed six-step profile.
 
 [Linux'ta RTX 3060 Ti 8 GB](RTX3060TI_LINUX_5S.md): özel dört adımlı resimden video profili ve tam 5 saniyelik 1080p çıktı bildiriyor. [kullanıcı bildirdi, PR #13] Desteklenen bir VideoTurko profili değildir; varsayılan sabit altı adımlı profildir.
+
+[RTX A4000 16 GB on Linux, above 209 frames](RTX_A4000_209_USTU_DENEYSEL.md): 226 to 481 frames with `VT_MAX_KARE`, 515 stopped on an engine assertion. [user-reported] Not a supported length; 209 stays the limit.
+
+[Linux'ta RTX A4000 16 GB, 209 kare üstü](RTX_A4000_209_USTU_DENEYSEL.md): `VT_MAX_KARE` ile 226-481 kare, 515 motordaki bir assert'te durdu. [kullanıcı bildirdi] Desteklenen uzunluk değildir; sınır 209 kalır.
