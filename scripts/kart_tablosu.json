@@ -54,8 +54,8 @@
       "uretici": "nvidia", "cc_min": 7.0, "cc_max": 8.0,
       "motor": "stock_cuda12",
       "ek_ayar": {"env": {"GGML_CUDA_CUBLAS_COMPUTE_TYPE": "f32"}},
-      "durum": "denenmemis",
-      "kanit": "[okudum] stock derleme sm_70 ve sm_75 listeler; bu sinifta hicbir kosu bildirilmedi. f32: uret.ps1'in eski kurali (cc >= 7.0) [okudum].",
+      "durum": "topluluk",
+      "kanit": "[kullanici bildirdi, PR #9] GTX 1650 4 GB (7.5): stock motor ve hazir sm_61 motor ek ayarsiz calisti (tek klip, tek tohum; docs/KART_PROFILLERI.md tablosu). RTX 20xx ve Volta icin kosu bildirilmedi [okudum: stock derleme sm_70 ve sm_75 listeler]. f32: uret.ps1'in eski kurali (cc >= 7.0) [okudum].",
       "belge": "docs/KART_PROFILLERI.md"
     },
     {
@@ -65,7 +65,7 @@
       "motor": "stock_cuda12",
       "ek_ayar": {"env": {"GGML_CUDA_CUBLAS_COMPUTE_TYPE": "f32"}},
       "durum": "topluluk",
-      "kanit": "[kullanici bildirdi, PR #6] RTX 3070 8 GB (8.6): stock motor, 243 kare tek gecis, uret.ps1 disinda; kalite kapisi kosulmadi. Laptop 6 GB kartlar (ornegin RTX 3060 Laptop) icin ayrica olcum yok [tahmin: ayni mimari].",
+      "kanit": "[kullanici bildirdi, PR #6] RTX 3070 8 GB (8.6): stock motor, 243 kare tek gecis, uret.ps1 disinda; kalite kapisi kosulmadi. Sonra docs/KART_PROFILLERI.md tablosuna eklenen olcumler [kullanici bildirdi]: RTX 3060 12 GB (PR #11), RTX 3060 Laptop 6 GB iki ayri cihaz (PR #14, PR #15), RTX 3070 Ti 8 GB (PR #16); bakimcilar tekrar etmedi.",
       "belge": "docs/RTX3070_STOCK_SDCPP.md"
     },
     {
