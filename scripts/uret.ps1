@@ -10,7 +10,7 @@
 # Sabitler (kalite): 6 adim, cfg 1, tohum 42, KAROSUZ VAE (--vae-tiling/--temporal-tiling HICBIR ZAMAN eklenmez).
 # Cozunurluk: varsayilan 640x384 (olculen ve bayt kanitli tek boyut). -W/-H: 32'nin kati, alan en az 640x384 (kalite dusurulmez);
 #   baska boyutlar 4 GB'da DENENMEDI ve kalite kapisi esikleri 640x384 icin kalibre (baska boyutta uyari basilir).
-# -InitImg varken tavan $KareInit kare; ikisi de yokken $KareSabit. -EndImg: kucuk kartta (VRAM < $KucukKartMiB = 8192 MiB ya da okunamadi) HER ZAMAN iki asama ve tavan
+# -InitImg varken tavan $KareInit kare; ikisi de yokken $KareSabit. -EndImg: kucuk kartta (VRAM < $KucukKartMiB = 8000 MiB ya da okunamadi) HER ZAMAN iki asama ve tavan
 #   $KareEnd4GB (175) [olctum 1050 Ti: ilk+son kare tek asamada 56 karede ve iki asamada 192'de sigmadi; iki asamada 56 ve 175 GECTI]; 8 GB ve ustu kartta tavan $KareInit (FLF orada bizce olculmedi).
 #   -EndImg tek basina (-InitImg'siz) olculmedi.
 # Kare sayisi 17k+5 olmali: 5, 22, 39, 56, 73, 90, 107, 124, 141, 158, 175, 192, 209 (209 = bilinen sinir; daha uzunu DENENMEDI; tavan: $KareSabit / VT_MAX_KARE).
@@ -47,7 +47,9 @@ $ErrorActionPreference = 'Stop'
 $KareSabit = 209   # TEK SABIT SAYI: varsayilan -Kare VE kare tavani (yalniz bu satir degisir). Daha buyuk kare reddedilir (denenmedi).
 $KareInit = 192   # TEK SABIT SAYI: -InitImg (resimden/onceki klipten devam) ile en fazla kare (192 / 24 fps = 8,0 sn). Tek GPU, tek sahne olculdu; baska GPU'larda denenmedi.
 $KareEnd4GB = 175   # TEK SABIT SAYI: 4 GB kartta -EndImg ile en fazla kare (175 / 24 fps = 7,3 sn; iki asama). 192 sigmadi [olctum 1050 Ti, FLF192 ve FLF175].
-$KucukKartMiB = 8192   # TEK SABIT SAYI: bu degerin altindaki (ya da VRAM'i okunamayan) kart 'kucuk' sayilir: -EndImg her zaman iki asama + tavan $KareEnd4GB, standart disi boyutta jeton tavani. 6/8 GB'da veri yok, temkinli taraf.
+$KucukKartMiB = 8000   # TEK SABIT SAYI: bu degerin altindaki (ya da VRAM'i okunamayan) kart 'kucuk' sayilir: -EndImg her zaman iki asama + tavan $KareEnd4GB, standart disi boyutta jeton tavani. 8 GB kartlar 8151-8192 MiB bildirir (8192 degil), bu yuzden esik 8192'nin biraz altinda [olculdu: RTX 4070 Laptop 8188; okundu: docs/KART_PROFILLERI.md, issue #26]. 6 GB ve alti hala kucuk; 8 GB icin jeton tavani olculmedi (dis olcum: 16320 jeton gecti).
+$OrtaKartUstMiB = 11000   # TEK SABIT SAYI: 8000 ile bu deger arasindaki kart '8 GB sinifi' sayilir (10 GB dahil, 11 GB ve ustu degil).
+$Jeton8GB = 16320   # TEK SABIT SAYI: 8 GB sinifinda standart disi boyutta jeton tavani; RTX 4070 Laptop 1280x768 56 kare = 16320 jeton gecti, 23328 sigmadi [kullanici bildirdi, issue #26]; bizce olculmedi.
 $KareVarsayilan = ($Kare -eq 0)
 if ($Kare -eq 0) { $Kare = $(if ($InitImg -or $EndImg) { $KareInit } else { $KareSabit }) }
 $Root = $(if ($env:VT_ROOT) { $env:VT_ROOT } else { (Resolve-Path (Join-Path $PSScriptRoot '..')).Path })
@@ -62,6 +64,20 @@ $MotorStock = $false
 if ($Secili -and $Secili.motor) {
     if (-not $env:VT_ENGINE_BIN -and $Secili.bin) { $Motor = Join-Path $Root ([string]$Secili.bin -replace '/', '\') }
     $MotorStock = ([string]$Secili.motor -like 'stock_*')
+    # VT_ENGINE_BIN baska bir klasoru gosteriyorsa secili_motor.json'daki TUR o klasore ait degil (issue #24): o klasor release (yamali) motor sayilir.
+    # Kendi stock motorunuzu VT_ENGINE_BIN ile veriyorsaniz VT_ENGINE_TYPE=stock yazin; yamali motoru zorlamak icin VT_ENGINE_TYPE=release.
+    if ($env:VT_ENGINE_BIN -and $Secili.bin) {
+        $tipFark = $false
+        try { $tipFark = ([IO.Path]::GetFullPath($env:VT_ENGINE_BIN).TrimEnd('\','/') -ne [IO.Path]::GetFullPath((Join-Path $Root ([string]$Secili.bin -replace '/', '\'))).TrimEnd('\','/')) } catch { $tipFark = $false }
+        if ($tipFark) { $MotorStock = $false; Write-Output ("bilgi: VT_ENGINE_BIN secili motor klasorunden ({0}) farkli: motor turu release (yamali, iki asama) sayildi; stock ise VT_ENGINE_TYPE=stock verin" -f $Secili.motor) }
+    }
+}
+if ($env:VT_ENGINE_TYPE) {
+    switch -Regex ($env:VT_ENGINE_TYPE.Trim().ToLowerInvariant()) {
+        '^stock' { $MotorStock = $true; if (-not ($Secili -and $Secili.motor)) { $Secili = [pscustomobject]@{ motor = 'stock_elle'; bin = ''; kart_sinifi = '' } }; Write-Output "bilgi: VT_ENGINE_TYPE=stock: motor turu stock (tek surec)"; break }
+        '^release' { $MotorStock = $false; Write-Output "bilgi: VT_ENGINE_TYPE=release: motor turu release (yamali, iki asama)"; break }
+        default { Write-Output ("UYARI: VT_ENGINE_TYPE='{0}' tanimsiz (stock | release), yok sayildi" -f $env:VT_ENGINE_TYPE) }
+    }
 }
 
 # --- GPU bilgisi (yalniz okuma; okunamazsa -1 ve hicbir sey degismez) ---
@@ -83,13 +99,16 @@ $SinifU = $null
 if ($GpuCc -ge 0) { $SinifU = Kart-Sinif $KartTabloU 'nvidia' $GpuCc }
 elseif ($Secili -and $Secili.kart_sinifi) { foreach ($ks in $KartTabloU.kartlar) { if ($ks.id -eq [string]$Secili.kart_sinifi) { $SinifU = $ks } } }
 $KucukKart = ($GpuTop -lt $KucukKartMiB)   # VRAM okunamadiysa (-1) kucuk sayilir (temkinli)
-$KareEndTavan = $(if ($KucukKart) { $KareEnd4GB } else { $KareInit })
+# 8 GB sinifi (8000 <= VRAM < 11000 MiB): jeton tavani $Jeton8GB (issue #26: RTX 4070 Laptop 16320 jeton gecti [kullanici bildirdi]); -EndImg eski kuralda (yalniz < $KucukKartMiB kisitli).
+$OrtaKart = (-not $KucukKart) -and ($GpuTop -lt $OrtaKartUstMiB)
+$EndKisit = $KucukKart   # -EndImg kisiti yalniz kucuk kartta (8 GB sinifi eski davranis: 192 kare, PR #16)
+$KareEndTavan = $(if ($EndKisit) { $KareEnd4GB } else { $KareInit })
 if ($EndImg -and $KareVarsayilan) { $Kare = $KareEndTavan }
 
 # --- dogrulamalar ---
 if ($Kare -lt 5 -or (($Kare - 5) % 17) -ne 0) { throw "[VT-E-KARE] Kare sayisi 17k+5 olmali (5, 22, 39, ... 17k+5; en fazla $KareSabit). Verilen: $Kare" }
 if ($InitImg -and $Kare -gt $KareInit) { throw "[VT-E-KARE] -InitImg ile en fazla $KareInit kare (8,0 sn) desteklenir: bu GPU'da $KareSabit kare -InitImg ile bellege sigmadi; baska GPU'larda denenmedi. -Kare $KareInit ya da daha kucugunu verin. Verilen: $Kare" }
-if ($EndImg -and $KucukKart -and $Kare -gt $KareEnd4GB) { throw "[VT-E-KARE] -EndImg ile bu kartta (VRAM $(if ($GpuTop -lt 0) { 'okunamadi, 8 GB alti sayildi' } else { "$GpuTop MiB; 8 GB alti" })) en fazla $KareEnd4GB kare (7,3 sn): 192 bu kartta sigmadi, 175 olculdu (GTX 1050 Ti, iki asama). -Kare $KareEnd4GB ya da daha kucugunu verin. Verilen: $Kare" }
+if ($EndImg -and $EndKisit -and $Kare -gt $KareEnd4GB) { throw "[VT-E-KARE] -EndImg ile bu kartta (VRAM $(if ($GpuTop -lt 0) { 'okunamadi, 8 GB alti sayildi' } else { "$GpuTop MiB; 8 GB alti" })) en fazla $KareEnd4GB kare (7,3 sn): 192 bu kartta sigmadi, 175 olculdu (GTX 1050 Ti, iki asama). -Kare $KareEnd4GB ya da daha kucugunu verin. Verilen: $Kare" }
 if ($EndImg -and $Kare -gt $KareInit) { throw "[VT-E-KARE] -EndImg ile en fazla $KareInit kare (8,0 sn) desteklenir (-InitImg ile ayni tavan; 8 GB ve ustu kartta FLF bizce olculmedi). -Kare $KareInit ya da daha kucugunu verin. Verilen: $Kare" }
 # Kare tavani = $KareSabit (dogrulanan en uzun kare). VT_MAX_KARE ile gecici ezilir (sonuc garanti degil).
 $KareTavan = $(if ($env:VT_MAX_KARE) { [int]$env:VT_MAX_KARE } else { $KareSabit })
@@ -102,10 +121,10 @@ $Standart = ($W -eq 640 -and $H -eq 384)
 $LatKare = $(if ($Kare -le 5) { 2 } else { [int][Math]::Floor(($Kare - 5) / 17) * 5 + 2 })
 $Jeton = [int](($W / 32) * ($H / 32) * $LatKare)
 # Kucuk kart (VRAM < $KucukKartMiB ya da okunamadi): standart disi boyutta jeton tavani = 640x384'te olculen en buyuk (209 kare 14880; -InitImg ile 192 kare 13680; -EndImg ile 175 kare 12480).
-$JetonTavan = $(if ($EndImg) { 12480 } elseif ($InitImg) { 13680 } else { 14880 })
+$JetonTavan = $(if ($EndImg) { 12480 } elseif ($InitImg) { 13680 } elseif ($OrtaKart) { $Jeton8GB } else { 14880 })
 if ($env:VT_MAX_JETON) { $JetonTavan = [int]$env:VT_MAX_JETON }
-if (-not $Standart -and ($KucukKart -or $env:VT_MAX_JETON) -and $Jeton -gt $JetonTavan) {
-    throw ("[VT-E-BOYUT] {0}x{1} ve {2} kare = {3} jeton; bu kartta tavan {4} jeton (4 GB'da olculen en buyuk is; VRAM {5}). Daha kisa -Kare ya da daha kucuk boyut verin; VT_MAX_JETON ile gecici ezilir (sonuc garanti degil){6}." -f $W, $H, $Kare, $Jeton, $JetonTavan, $(if ($GpuTop -lt 0) { 'okunamadi, 8 GB alti sayildi' } else { "$GpuTop MiB" }), $(if ($GpuTop -lt 0) { '; nvidia-smi VRAM okuyamadi: buyuk kartiniz varsa VT_GPU_VRAM=<MiB> ile toplam VRAM verilebilir (test amacli, sonuc garanti degil)' } else { '' }))
+if (-not $Standart -and ($KucukKart -or $OrtaKart -or $env:VT_MAX_JETON) -and $Jeton -gt $JetonTavan) {
+    throw ("[VT-E-BOYUT] {0}x{1} ve {2} kare = {3} jeton; bu kartta tavan {4} jeton ({7}; VRAM {5}). Daha kisa -Kare ya da daha kucuk boyut verin; VT_MAX_JETON ile gecici ezilir (sonuc garanti degil){6}." -f $W, $H, $Kare, $Jeton, $JetonTavan, $(if ($GpuTop -lt 0) { 'okunamadi, 8 GB alti sayildi' } else { "$GpuTop MiB" }), $(if ($GpuTop -lt 0) { '; nvidia-smi VRAM okuyamadi: buyuk kartiniz varsa VT_GPU_VRAM=<MiB> ile toplam VRAM verilebilir (test amacli, sonuc garanti degil)' } else { '' }), $(if ($OrtaKart -and -not $EndImg -and -not $InitImg) { '8 GB sinifinda bildirilen en buyuk is 16320 jeton, bizce olculmedi' } else { '4 GB''da olculen en buyuk is' }))
 }
 if (-not (Test-Path -LiteralPath $Istem)) { throw "[VT-E-ISTEM] istem dosyasi yok: $Istem" }
 if ($InitImg -and -not (Test-Path -LiteralPath $InitImg -PathType Leaf)) { throw "[VT-E-ISTEM] -InitImg dosyasi bulunamadi: $InitImg (ilk kare gorseli, PNG/JPG; video boyutunda verin)" }
@@ -165,7 +184,7 @@ function Ortak-Arg([string]$Out) {
 # Ortam: jeton > 7680 iki asama (640x384'te 108+ kare ile ayni; dogrulanmis tarif: 209 icin DiT asamasi + ayri VAE asamasi; 141 icin ayri VAE kare+ses md5 bayt aynisi).
 # -TekAsama: elle tek surec (buyuk VRAM'li kart); varsayilan degismez.
 # -EndImg kucuk kartta (< $KucukKartMiB) her zaman iki asama: tek asamada 56 karede bile sigmadi [olctum 1050 Ti FLF56; iki asamada FLF56b GECTI].
-$IkiAsama = (($Jeton -gt 7680) -or ($EndImg -and $KucukKart) -or $VtIki) -and -not $TekAsama
+$IkiAsama = (($Jeton -gt 7680) -or ($EndImg -and $EndKisit) -or $VtIki) -and -not $TekAsama
 if ($MotorStock) { $IkiAsama = $false }   # stock motorda SD_* yama anahtarlari yok: iki asama anlamsiz, tek surec
 $Env1 = [ordered]@{}
 $Env2 = [ordered]@{}
@@ -272,10 +291,12 @@ function Vram-Ipucu {
         $p = Join-Path $Dizin $n
         if ((Test-Path -LiteralPath $p) -and (Select-String -LiteralPath $p -Pattern 'failed during weight preparation|ALLOC_FAILED|cannot make enough memory|out of memory|vae decode compute failed|need [0-9.]+ ?MB.{0,60}budget' -Quiet)) { $bulundu = $true }
     }
+    if ($script:VramTepe -gt 0 -or $script:VramBas -ge 0) { Write-Output ("VRAM (kosu basarisiz; nvidia-smi, tum kart, 5 sn ornek): baslangic kullanimi {0} MiB, tepe {1} MiB, toplam {2} MiB" -f $script:VramBas, $script:VramTepe, $script:VramTop) }   # #24: basarisiz kosuda da gorunsun
     if ($bulundu) {
         Write-Output '[VT-E-VRAM] VRAM yetmedi olabilir (kesin degil): logda bellek ayirma/agirlik hazirlama hatasi var.'
         Write-Output '  Once: diger uygulamalari ve ikinci ekrani kapatin, yeniden deneyin (ekran yuku VRAM tepesini artirir).'
-        if ($Kare - 17 -ge 56) { Write-Output ("  Olmazsa daha kisa deneyin: -Kare {0} (56..$KareSabit, 17k+5 gridi). Ayrinti: docs\SIK_HATALAR.md A.1" -f ($Kare - 17)) }
+        if ($GpuTop -ge $OrtaKartUstMiB) { Write-Output '  Bu kart buyuk (11 GB ve ustu): once baslangic VRAM kullanimini dusurun (tarayici, sohbet uygulamalari, widget); kare azaltmak son care (12 GB kartlarda 209 kare sigdigi bildirildi [kullanici bildirdi, issue #23, issue #24]). Ayrinti: docs\SIK_HATALAR.md A.1' }
+        elseif ($Kare - 17 -ge 56) { Write-Output ("  Olmazsa daha kisa deneyin: -Kare {0} (56..$KareSabit, 17k+5 gridi). Ayrinti: docs\SIK_HATALAR.md A.1" -f ($Kare - 17)) }
         else { Write-Output '  Ayrinti: docs\SIK_HATALAR.md A.1 (bu kare sayisindan daha kisasi onerilmiyor)' }
     }
 }
@@ -297,15 +318,15 @@ try {
     if (Test-Path -LiteralPath $Cikti) { Remove-Item -LiteralPath $Cikti -Force }   # eski avi basari sayilmasin
     $k1 = Asama-Kos '_a1' $Env1
     if ($IkiAsama) {
-        if (-not (Test-Path -LiteralPath $Latent) -or (Get-Item -LiteralPath $Latent).Length -lt 1MB) { throw "[VT-E-LATENT] asama 1 latent yazmadi (cikis $k1); ham_err_${Ad}_a1.txt'e bakin" }
+        if (-not (Test-Path -LiteralPath $Latent) -or (Get-Item -LiteralPath $Latent).Length -lt 1MB) { throw "[VT-E-LATENT] asama 1 latent yazmadi (cikis $k1; cikis -1073740791 / GGML_ASSERT offset 1<<30 ise is motorun yama sinirini astiysa: daha kucuk boyut ya da kare deneyin); ham_err_${Ad}_a1.txt'e bakin" }
         Write-Output ("asama 1 tamam (latent {0:N1} MB), asama 2 (ayri surec VAE) basliyor" -f ((Get-Item -LiteralPath $Latent).Length / 1MB))
         if (Test-Path -LiteralPath $Cikti) { Remove-Item -LiteralPath $Cikti -Force }
         $k2 = Asama-Kos '_a2' $Env2
         if ($k2 -ne 0) { Write-Output "UYARI: asama 2 cikis kodu '$k2' (tek basina basari olcutu degil; avi + kare sayisi + log denetlenir)" }
-        if (-not (Log-Temiz '_a2')) { throw "[VT-E-TILING] asama 2 logunda karolu VAE geri-dususu ya da bellek hatasi: cikti GECERSIZ" }
+        if (-not (Log-Temiz '_a2')) { throw "[VT-E-TILING] asama 2 logunda karolu VAE geri-dususu ya da bellek hatasi (karolu VAE calismamis olabilir; bellek hatasiysa [VT-E-VRAM] satirina bakin): cikti GECERSIZ" }
     } else {
         if ($k1 -ne 0) { Write-Output "UYARI: sd-cli cikis kodu '$k1' (tek basina basari olcutu degil; avi + kare sayisi + log denetlenir)" }
-        if (-not (Log-Temiz '_a1')) { throw "[VT-E-TILING] logda karolu VAE geri-dususu ya da bellek hatasi: cikti GECERSIZ" }
+        if (-not (Log-Temiz '_a1')) { throw "[VT-E-TILING] logda karolu VAE geri-dususu ya da bellek hatasi (karolu VAE calismamis olabilir; bellek hatasiysa [VT-E-VRAM] satirina bakin): cikti GECERSIZ" }
     }
     if (-not (Test-Path -LiteralPath $Cikti) -or (Get-Item -LiteralPath $Cikti).Length -lt 10KB) { throw "[VT-E-CIKTI] cikti dosyasi yok ya da cok kucuk: $Cikti" }
     # BASARI OLCUTU (birlikte): avi var + kare sayisi + log temiz (+ VRAM tepe uyarisi); cikis kodu tek basina olcut degil. [tasarim, gercek kosuda gorulecek]

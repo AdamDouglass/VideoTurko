@@ -14,7 +14,9 @@ set -euo pipefail
 KARE_SABIT=209        # varsayilan -Kare VE kare tavani
 KARE_INIT=192         # --init-img ile en fazla kare
 KARE_END_4GB=175      # 8 GB alti kartta --end-img ile en fazla kare
-KUCUK_KART_MIB=8192   # bu degerin altindaki (ya da VRAM'i okunamayan) kart "kucuk" sayilir
+ORTA_KART_UST_MIB=11000   # 8000 ile bu deger arasi = "8 GB sinifi"
+JETON_8GB=16320   # 8 GB sinifinda standart disi boyut jeton tavani [kullanici bildirdi, issue #26: RTX 4070 Laptop 16320 gecti; bizce olculmedi]
+KUCUK_KART_MIB=8000   # 8 GB kartlar 8151-8192 MiB bildirir (issue #26); bu degerin altindaki (ya da VRAM'i okunamayan) kart "kucuk" sayilir
 
 hata() {   # hata KOD "mesaj" [cikis]: uret.ps1'deki [VT-E-...] imzalariyla ayni kodlar (docs/hata_imzalari.json)
   echo "HATA: [$1] $2" >&2
@@ -98,8 +100,10 @@ if [[ "$GPU_SAYI" -gt 1 ]]; then
   echo "bilgi: $GPU_SAYI GPU goruldu; sd-cli CUDA 0'i kullanir. Betik temkinli tarafla karar verir: en kucuk VRAM $GPU_VRAM MiB, en kucuk compute capability $GPU_CC_YAZI. Yalniz tek GPU ile olculdu; karti CUDA_VISIBLE_DEVICES ile secebilirsiniz."
 fi
 
-KUCUK_KART=0
+KUCUK_KART=0; ORTA_KART=0
 [[ "$GPU_VRAM" -lt "$KUCUK_KART_MIB" ]] && KUCUK_KART=1   # VRAM okunamadiysa (-1) kucuk sayilir (temkinli)
+[[ "$KUCUK_KART" -eq 0 && "$GPU_VRAM" -lt "$ORTA_KART_UST_MIB" ]] && ORTA_KART=1
+END_KISIT=0; [[ "$KUCUK_KART" -eq 1 ]] && END_KISIT=1   # -EndImg kisiti yalniz kucuk kartta (eski davranis)
 
 # --- varsayilan kare ve dogrulamalar (uret.ps1 ile ayni mesaj kodlari)
 KARE_VARSAYILAN=0
@@ -107,12 +111,12 @@ if [[ "$KARE" -eq 0 ]]; then
   KARE_VARSAYILAN=1
   if [[ -n "$INIT_IMG" || -n "$END_IMG" ]]; then KARE="$KARE_INIT"; else KARE="$KARE_SABIT"; fi
 fi
-KARE_END_TAVAN="$KARE_INIT"; [[ "$KUCUK_KART" -eq 1 ]] && KARE_END_TAVAN="$KARE_END_4GB"
+KARE_END_TAVAN="$KARE_INIT"; [[ "$END_KISIT" -eq 1 ]] && KARE_END_TAVAN="$KARE_END_4GB"
 [[ -n "$END_IMG" && "$KARE_VARSAYILAN" -eq 1 ]] && KARE="$KARE_END_TAVAN"
 
 if [[ "$KARE" -lt 5 || $(( (KARE - 5) % 17 )) -ne 0 ]]; then hata VT-E-KARE "Kare sayisi 17k+5 olmali (5, 22, 39, ... en fazla $KARE_SABIT). Verilen: $KARE"; fi
 if [[ -n "$INIT_IMG" && "$KARE" -gt "$KARE_INIT" ]]; then hata VT-E-KARE "--init-img ile en fazla $KARE_INIT kare (8,0 sn) desteklenir. Verilen: $KARE"; fi
-if [[ -n "$END_IMG" && "$KUCUK_KART" -eq 1 && "$KARE" -gt "$KARE_END_4GB" ]]; then hata VT-E-KARE "--end-img ile bu kartta (VRAM $GPU_VRAM MiB; 8 GB alti ya da okunamadi) en fazla $KARE_END_4GB kare. Verilen: $KARE"; fi
+if [[ -n "$END_IMG" && "$END_KISIT" -eq 1 && "$KARE" -gt "$KARE_END_4GB" ]]; then hata VT-E-KARE "--end-img ile bu kartta (VRAM $GPU_VRAM MiB; 8 GB alti ya da okunamadi) en fazla $KARE_END_4GB kare. Verilen: $KARE"; fi
 if [[ -n "$END_IMG" && "$KARE" -gt "$KARE_INIT" ]]; then hata VT-E-KARE "--end-img ile en fazla $KARE_INIT kare desteklenir. Verilen: $KARE"; fi
 KARE_TAVAN="$KARE_SABIT"
 if [[ -n "${VT_MAX_KARE:-}" ]]; then pozitif "$VT_MAX_KARE" && KARE_TAVAN="$VT_MAX_KARE" || echo "UYARI: VT_MAX_KARE='$VT_MAX_KARE' pozitif tam sayi degil, yok sayildi"; fi
@@ -126,9 +130,9 @@ STANDART=0; [[ "$W" -eq 640 && "$H" -eq 384 ]] && STANDART=1
 # Jeton formulu uret.ps1 ile ayni: jeton = (W/32)*(H/32)*latent_kare; latent_kare = ((Kare-5)/17)*5+2 (Kare 5 ise 2)
 if [[ "$KARE" -le 5 ]]; then LAT_KARE=2; else LAT_KARE=$(( (KARE - 5) / 17 * 5 + 2 )); fi
 JETON=$(( (W / 32) * (H / 32) * LAT_KARE ))
-if [[ -n "$END_IMG" ]]; then JETON_TAVAN=12480; elif [[ -n "$INIT_IMG" ]]; then JETON_TAVAN=13680; else JETON_TAVAN=14880; fi
+if [[ -n "$END_IMG" ]]; then JETON_TAVAN=12480; elif [[ -n "$INIT_IMG" ]]; then JETON_TAVAN=13680; elif [[ "$ORTA_KART" -eq 1 ]]; then JETON_TAVAN="$JETON_8GB"; else JETON_TAVAN=14880; fi
 if [[ -n "${VT_MAX_JETON:-}" ]]; then pozitif "$VT_MAX_JETON" && JETON_TAVAN="$VT_MAX_JETON" || echo "UYARI: VT_MAX_JETON='$VT_MAX_JETON' pozitif tam sayi degil, yok sayildi"; fi
-if [[ "$STANDART" -eq 0 && ( "$KUCUK_KART" -eq 1 || -n "${VT_MAX_JETON:-}" ) && "$JETON" -gt "$JETON_TAVAN" ]]; then
+if [[ "$STANDART" -eq 0 && ( "$KUCUK_KART" -eq 1 || "$ORTA_KART" -eq 1 || -n "${VT_MAX_JETON:-}" ) && "$JETON" -gt "$JETON_TAVAN" ]]; then
   hata VT-E-BOYUT "${W}x${H} ve $KARE kare = $JETON jeton; bu kartta tavan $JETON_TAVAN jeton (VRAM $GPU_VRAM MiB). Daha kisa --kare ya da daha kucuk boyut verin; VT_MAX_JETON ile gecici ezilir (sonuc garanti degil)."
 fi
 
@@ -154,7 +158,7 @@ fi
 
 # --- iki asama karari (uret.ps1 ile ayni): jeton > 7680, ya da 8 GB alti kartta --end-img
 IKI_ASAMA=0
-if [[ "$TEK_ASAMA" -eq 0 ]] && [[ "$JETON" -gt 7680 || ( -n "$END_IMG" && "$KUCUK_KART" -eq 1 ) ]]; then IKI_ASAMA=1; fi
+if [[ "$TEK_ASAMA" -eq 0 ]] && [[ "$JETON" -gt 7680 || ( -n "$END_IMG" && "$END_KISIT" -eq 1 ) ]]; then IKI_ASAMA=1; fi
 
 # --- sure tavani (dk): uret.ps1 ile ayni formul = max(30, ceil(80 * Kare / 209 * alan/245760)); --tavan-dk ile ezilir
 if [[ "$TAVAN_DK" -le 0 ]]; then

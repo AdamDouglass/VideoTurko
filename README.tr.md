@@ -120,7 +120,7 @@ Durum sözcükleri: **doğrulanmış** = bakımcılar ölçtü; **topluluk** = b
 | GTX 10xx (Pascal, compute capability 6.1-6.9) | hazır motor (`sm_61`, bizim yamalarımız) | doğrulanmış, yalnız GTX 1050 Ti | [ölçtüm] `docs/OLCUMLER.md`; diğer Pascal kartlar [tahmin: aynı mimari] |
 | RTX 20xx, GTX 16xx (Turing/Volta, 7.x) | stock CUDA motoru | denenmemiş | [okudum] stock derleme `sm_70` ve `sm_75` listeler; bildirilen koşu yok |
 | RTX 30xx (Ampere, 8.0-8.8) | stock CUDA motoru | topluluk | [user-reported, PR #6] RTX 3070 8 GB, `uret.ps1` dışında koşuldu, kalite kapısı koşulmadı; 6 GB laptop kartlarda ölçüm yok [tahmin: aynı mimari] |
-| RTX 40xx (Ada, 8.9) | hazır motor, `f32` | topluluk | [user-reported, issue #1] RTX 4070 Ti; [user-reported, PR #5] RTX 4060, yerel `sm_89` derleme; stock motor bu sınıfta denenmedi |
+| RTX 40xx (Ada, 8.9) | stock CUDA motoru, `f32` | topluluk | [user-reported, issue #25] RTX 4070 Laptop 8 GB: stock motor 209 kare 275 s, hazır motor 620 s, kapılar ikisinde geçti (stock koşu `uret.ps1` dışında); [user-reported, issue #24] RTX 3060 12 GB (Ampere): 209 karede stock 2,6x hızlı; önceki raporlar hazır motorla: [user-reported, issue #1] RTX 4070 Ti, [user-reported, PR #5] RTX 4060, yerel `sm_89` derleme. Elle seçim: `-MotorTuru` / `VT_ENGINE_TYPE` |
 | Hopper ve daha yeni veri merkezi kartları (9.0-11.x) | stock CUDA motoru | denenmemiş | [okudum] stock derleme `sm_90` ve `sm_100` listeler; bildirilen koşu yok |
 | RTX 50xx (Blackwell, 12.0 ve üzeri) | stock CUDA motoru | denenmemiş | [okudum] stock derleme `sm_120` listeler; RTX 50'de stock koşu yok; [user-reported, PR #3] hazır `sm_61` motor 56+ karede siyah video verdi, yerel `sm_120` derleme çalıştı |
 | AMD Radeon | stock Vulkan motoru, `minimax_h3_attn_chunk_budget=0.03` | topluluk | [user-reported] RX 9070 XT 16 GB, 209 kare; ROCm otomatik değil (`hipblas.dll` ister) |
@@ -242,4 +242,4 @@ Köşeli parantezde geçen koşu adları (bize ait koşu adları, bu depoda dosy
 - **Temiz kök testi bekliyor:** kurulum ve çalıştırma betikleri boş klasörde yalnız bu talimatla henüz doğrulanmadı; test (56 karede referansa bayt kıyası dahil) kaydedilince bu bölüm güncellenir.
 - Çıktı videolar depoda yok.
 
-<!-- i18n-source: README.md sha256:d7bba453508a -->
+<!-- i18n-source: README.md sha256:57932e241b79 -->

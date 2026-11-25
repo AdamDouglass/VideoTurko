@@ -110,7 +110,7 @@ class SozdizimiVeYapi(unittest.TestCase):
             self.assertNotIn("--vae-tiling", satir)
             self.assertNotIn("--temporal-tiling", satir)
         self.assertNotIn('"$SD_CLI" "${ARGS[@]}" > "$log" 2>&1 || true', u)   # sd-cli cikis kodu yutulmaz
-        self.assertIn("KUCUK_KART_MIB=8192", u)
+        self.assertIn("KUCUK_KART_MIB=8000", u)
 
 
 @unittest.skipUnless(BASH, "bash (Git Bash) gerekir")
@@ -191,7 +191,12 @@ class UretKuru(unittest.TestCase):
         kod, c = self.kos("--kare", "209", "-W", "832", "-H", "512", "--kuru", vram="4096")   # standart disi + kucuk kart: jeton tavani
         self.assertEqual(kod, 1, c)
         self.assertIn("[VT-E-BOYUT]", c)
-        kod, c = self.kos("--kare", "209", "-W", "832", "-H", "512", "--kuru", vram="8192")   # 8192 = buyuk kart: tavan uygulanmaz
+        kod, c = self.kos("--kare", "209", "-W", "832", "-H", "512", "--kuru", vram="8192")   # 8 GB sinifi: tavan 16320 (issue #26); 25792 jeton reddedilir
+        self.assertEqual(kod, 1, c)
+        self.assertIn("tavan 16320", c)
+        kod, c = self.kos("--kare", "56", "-W", "1280", "-H", "768", "--kuru", vram="8188")   # 16320 jeton = bildirilen gecen is
+        self.assertEqual(kod, 0, c)
+        kod, c = self.kos("--kare", "209", "-W", "832", "-H", "512", "--kuru", vram="12288")   # 11 GB ve ustu: tavan uygulanmaz
         self.assertEqual(kod, 0, c)
 
     def test_dogrulamalar(self):

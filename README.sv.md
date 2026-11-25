@@ -125,7 +125,7 @@ Status words: **verified** = the maintainers measured it; **community** = a user
 | GTX 10xx (Pascal, compute capability 6.1-6.9) | release engine (`sm_61`, our patches) | verified, GTX 1050 Ti only | [measured] `docs/OLCUMLER.md`; other Pascal cards [guess: same architecture] |
 | RTX 20xx, GTX 16xx (Turing/Volta, 7.x) | stock CUDA engine | untried | [read] the stock build lists `sm_70` and `sm_75`; no run reported |
 | RTX 30xx (Ampere, 8.0-8.8) | stock CUDA engine | community | [user-reported, PR #6] RTX 3070 8 GB, run outside `uret.ps1`, quality gate not run; no measurement on 6 GB laptop cards [guess: same architecture] |
-| RTX 40xx (Ada, 8.9) | release engine, `f32` | community | [user-reported, issue #1] RTX 4070 Ti; [user-reported, PR #5] RTX 4060 with a local `sm_89` build; the stock engine was not tried on this class |
+| RTX 40xx (Ada, 8.9) | stock CUDA engine, `f32` | community | [user-reported, issue #25] RTX 4070 Laptop 8 GB: stock engine 209 frames 275 s vs release engine 620 s, gates passed on both (stock run outside `uret.ps1`); [user-reported, issue #24] RTX 3060 12 GB (Ampere): stock 2.6x faster than release at 209 frames; earlier reports ran the release engine: [user-reported, issue #1] RTX 4070 Ti, [user-reported, PR #5] RTX 4060 with a local `sm_89` build. Override: `-MotorTuru` / `VT_ENGINE_TYPE` |
 | Hopper and newer data-centre cards (9.0-11.x) | stock CUDA engine | untried | [read] the stock build lists `sm_90` and `sm_100`; no run reported |
 | RTX 50xx (Blackwell, 12.0 and up) | stock CUDA engine | untried | [read] the stock build lists `sm_120`; no stock run on an RTX 50 card; [user-reported, PR #3] the release `sm_61` engine gave a black video at 56+ frames and a local `sm_120` build worked |
 | AMD Radeon | stock Vulkan engine, `minimax_h3_attn_chunk_budget=0.03` | community | [user-reported] RX 9070 XT 16 GB, 209 frames; ROCm is not automatic (it needs `hipblas.dll`) |
@@ -249,4 +249,4 @@ Körningsnamn som används inom hakparentes (våra egna körningsnamn, inte file
 - **Test i tom rotmapp återstår:** installations- och körskripten har ännu inte verifierats från en tom mapp med enbart de här instruktionerna; det här avsnittet uppdateras när det testet (inklusive en byte-jämförelse med 56 bildrutor mot referensen) är dokumenterat.
 - Inga genererade videor levereras här.
 
-<!-- i18n-source: README.md sha256:d7bba453508a -->
+<!-- i18n-source: README.md sha256:57932e241b79 -->

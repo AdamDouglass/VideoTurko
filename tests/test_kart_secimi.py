@@ -24,7 +24,7 @@ KARTLAR = {   # ad -> (sahte olcum, beklenen motor, beklenen sinif)
     "gtx1050ti": ("gpu=NVIDIA GeForce GTX 1050 Ti;vram=4096;cc=6.1", "release_sm61", "pascal"),
     "rtx3060_laptop": ("gpu=NVIDIA GeForce RTX 3060 Laptop GPU;vram=6144;cc=8.6", "stock_cuda12", "ampere"),
     "rtx3070": ("gpu=NVIDIA GeForce RTX 3070;vram=8192;cc=8.6", "stock_cuda12", "ampere"),
-    "rtx4060": ("gpu=NVIDIA GeForce RTX 4060;vram=8188;cc=8.9", "release_sm61", "ada"),
+    "rtx4060": ("gpu=NVIDIA GeForce RTX 4060;vram=8188;cc=8.9", "stock_cuda12", "ada"),
     "rtx5060_laptop": ("gpu=NVIDIA GeForce RTX 5060 Laptop GPU;vram=8151;cc=12.0", "stock_cuda12", "blackwell"),
     "rtx2060": ("gpu=NVIDIA GeForce RTX 2060;vram=6144;cc=7.5", "stock_cuda12", "turing_volta"),
     "amd_rx9070xt": ("gpu=yok;amd=AMD Radeon RX 9070 XT", "stock_vulkan", "amd"),
@@ -86,9 +86,9 @@ class KurKartSecimi(unittest.TestCase):
         self.assertIn("[VT-E-GPU]", c)
 
     def test_motor_turu_elle(self):
-        kod, c, _ = self.kuru(KARTLAR["rtx4060"][0], "-MotorTuru", "stock_cuda12")
+        kod, c, _ = self.kuru(KARTLAR["rtx4060"][0], "-MotorTuru", "release_sm61")   # Ada default is stock since issues #24/#25; release stays selectable
         self.assertEqual(kod, 0, c)
-        self.assertIn("Motor secimi: stock_cuda12 (elle, -MotorTuru)", c)
+        self.assertIn("Motor secimi: release_sm61 (elle, -MotorTuru)", c)
         kod, c, _ = self.kuru(KARTLAR["rtx3070"][0], "-MotorTuru", "yok_boyle_motor")
         self.assertNotEqual(kod, 0)
         self.assertIn("bilinmeyen -MotorTuru", c)
